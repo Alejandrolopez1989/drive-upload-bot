@@ -1,5 +1,5 @@
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 import requests
 import os
 
@@ -7,30 +7,34 @@ import os
 TELEGRAM_TOKEN = os.getenv('7227893240:AAH-lq8p9H9PbawMmhymXcHGKhNInafwmJs')
 UPLOAD_URL = os.getenv('http://up.hydrax.net/aabe07df18b06d673d7c5ee1f91a6d40')  # La URL donde se subirán los videos
 
-def start(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text('¡Hola! Envía un video para subirlo.')
+async def start(update: Update, context: CallbackContext) -> None:
+    await update.message.reply_text('¡Hola! Envía un video para subirlo.')
 
-def handle_video(update: Update, context: CallbackContext) -> None:
-    file = update.message.video.get_file()
-    file.download('video.mp4')
+async def handle_video(update: Update, context: CallbackContext) -> None:
+    file = await update.message.video.get_file()
+    await file.download('video.mp4')
 
-    with open('video.mp4', 'rb') as f:
-        response = requests.post(UPLOAD_URL, files={'file': f})
+    file_name = 'video.mp4'
+    file_type = 'video/mp4'
+    file_path = './video.mp4'
+    files = { 'file': (file_name, open(file_path, 'rb'), file_type) }
 
-    if response.status_code == 200:
-        update.message.reply_text('¡Video subido con éxito!')
-    else:
-        update.message.reply_text('Hubo un error al subir el video.')
+    try:
+        response = requests.post(UPLOAD_URL, files=files)
+        if response.status_code == 200:
+            await update.message.reply_text('¡Video subido con éxito!')
+        else:
+            await update.message.reply_text(f'Hubo un error al subir el video: {response.text}')
+    except Exception as e:
+        await update.message.reply_text(f'Error al subir el video: {str(e)}')
 
 def main() -> None:
-    updater = Updater(TELEGRAM_TOKEN)
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    dispatcher = updater.dispatcher
-    dispatcher.add_handler(CommandHandler('start', start))
-    dispatcher.add_handler(MessageHandler(Filters.video, handle_video))
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(MessageHandler(filters.VIDEO, handle_video))
 
-    updater.start_polling()
-    updater.idle()
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
