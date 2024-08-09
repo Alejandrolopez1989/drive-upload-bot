@@ -4,8 +4,8 @@
     { "src": "bot.py", "use": "@vercel/python" }
   ],
   "routes": [
-    { "src": "/webhook", "dest": "bot.py" },
-    { "src": "/set-webhook", "dest": "bot.py" },
-    { "src": "/get-webhook-info", "dest": "bot.py" }
+    { "src": "/webhook", "dest": "bot.py", "headers": { "Cache-Control": "no-store" } },
+    { "src": "/set-webhook", "dest": "bot.py", "headers": { "Cache-Control": "no-store" } },
+    { "src": "/get-webhook-info", "dest": "bot.py", "headers": { "Cache-Control": "no-store" } }
   ]
 }
