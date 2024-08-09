@@ -3,11 +3,12 @@ import requests
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+# Token del bot de Telegram (reemplaza con tu token)
+TELEGRAM_TOKEN = '7227893240:AAH-lq8p9H9PbawMmhymXcHGKhNInafwmJs'
 UPLOAD_URL = 'http://up.hydrax.net/aabe07df18b06d673d7c5ee1f91a6d40'
 
 def start(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text('¡Hola! Envíame un video y lo subiré al servidor.')
+    update.message.reply_text('¡Hola! Reenvíame un video y lo subiré al servidor.')
 
 def upload_video(file_path: str):
     file_name = os.path.basename(file_path)
@@ -22,7 +23,7 @@ def handle_video(update: Update, context: CallbackContext) -> None:
     if video:
         file_id = video.file_id
         file = context.bot.get_file(file_id)
-        file_path = f'/tmp/{file_id}.mp4'
+        file_path = f'./{file_id}.mp4'
         file.download(file_path)
         
         response_text = upload_video(file_path)
