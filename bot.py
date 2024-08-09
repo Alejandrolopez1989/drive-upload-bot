@@ -1,14 +1,13 @@
 import os
 import requests
+from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
-# Token del bot de Telegram (reemplaza con tu token)
-TELEGRAM_TOKEN = '7227893240:AAH-lq8p9H9PbawMmhymXcHGKhNInafwmJs'
-UPLOAD_URL = 'http://up.hydrax.net/aabe07df18b06d673d7c5ee1f91a6d40'
+app = Flask(__name__)
 
-def start(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text('¡Hola! Reenvíame un video y lo subiré al servidor.')
+TELEGRAM_TOKEN = os.getenv('7227893240:AAH-lq8p9H9PbawMmhymXcHGKhNInafwmJs')
+UPLOAD_URL = 'http://up.hydrax.net/aabe07df18b06d673d7c5ee1f91a6d40'
 
 def upload_video(file_path: str):
     file_name = os.path.basename(file_path)
@@ -18,29 +17,32 @@ def upload_video(file_path: str):
         response = requests.post(UPLOAD_URL, files=files)
     return response.text
 
-def handle_video(update: Update, context: CallbackContext) -> None:
-    video = update.message.video
-    if video:
-        file_id = video.file_id
-        file = context.bot.get_file(file_id)
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = request.get_json()
+    if 'message' in update and 'video' in update['message']:
+        video = update['message']['video']
+        file_id = video['file_id']
+        file_url = f'https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_id}'
         file_path = f'./{file_id}.mp4'
-        file.download(file_path)
-        
+        response = requests.get(file_url)
+        with open(file_path, 'wb') as f:
+            f.write(response.content)
         response_text = upload_video(file_path)
-        update.message.reply_text(f'Video subido. Respuesta del servidor:\n{response_text}')
-        
         os.remove(file_path)
+        return jsonify({'status': 'success', 'response': response_text})
+    return jsonify({'status': 'no video found'})
 
-def main():
-    updater = Updater(TELEGRAM_TOKEN)
+@app.route('/set-webhook', methods=['GET'])
+def set_webhook():
+    webhook_url = request.args.get('url')
+    response = requests.get(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}')
+    return jsonify(response.json())
 
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.video, handle_video))
-
-    updater.start_polling()
-    updater.idle()
+@app.route('/get-webhook-info', methods=['GET'])
+def get_webhook_info():
+    response = requests.get(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo')
+    return jsonify(response.json())
 
 if __name__ == '__main__':
-    main()
+    app.run()
