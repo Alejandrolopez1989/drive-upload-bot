@@ -5,7 +5,7 @@
       "src": "bot.py",
       "use": "@vercel/python",
       "config": {
-        "maxLambdaSize": "50mb"
+        "maxLambdaSize": "10mb"
       }
     }
   ],
