@@ -1,13 +1,13 @@
 import os
 import requests
 from flask import Flask, request, jsonify
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
 app = Flask(__name__)
 
+# Variables de entorno
 TELEGRAM_TOKEN = os.getenv('7227893240:AAH-lq8p9H9PbawMmhymXcHGKhNInafwmJs')
 UPLOAD_URL = 'http://up.hydrax.net/aabe07df18b06d673d7c5ee1f91a6d40'
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
 def upload_video(file_path: str):
     file_name = os.path.basename(file_path)
@@ -35,8 +35,7 @@ def webhook():
 
 @app.route('/set-webhook', methods=['GET'])
 def set_webhook():
-    webhook_url = request.args.get('url')
-    response = requests.get(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}')
+    response = requests.get(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={WEBHOOK_URL}')
     return jsonify(response.json())
 
 @app.route('/get-webhook-info', methods=['GET'])
