@@ -7,7 +7,7 @@ app = Flask(__name__)
 # Variables de entorno
 TELEGRAM_TOKEN = os.getenv('7227893240:AAH-lq8p9H9PbawMmhymXcHGKhNInafwmJs')
 UPLOAD_URL = 'http://up.hydrax.net/aabe07df18b06d673d7c5ee1f91a6d40'
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+WEBHOOK_URL = os.getenv('https://upload-abyss-bot.vercel.app//webhook')
 
 def upload_video(file_path: str):
     file_name = os.path.basename(file_path)
