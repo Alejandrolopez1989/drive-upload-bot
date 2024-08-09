@@ -4,7 +4,7 @@ import requests
 import os
 
 # Obtén el token de Telegram desde las variables de entorno
-TELEGRAM_TOKEN = os.getenv('7227893240:AAH-lq8p9H9PbawMmhymXcHGKhNInafwmJs')
+TELEGRAM_TOKEN = os.getenv('7227893240:AAH75ahkGL_Bu687dk2vXv-lc_n5WYRPgTQ')
 UPLOAD_URL = os.getenv('http://up.hydrax.net/aabe07df18b06d673d7c5ee1f91a6d40')  # La URL donde se subirán los videos
 
 async def start(update: Update, context: CallbackContext) -> None:
