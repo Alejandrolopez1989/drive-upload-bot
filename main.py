@@ -1,8 +1,7 @@
 import logging
-from functools import wraps
+import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,4 +23,11 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("hello", hello))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), echo))
-    app.run_polling()
+
+    # Configuración del webhook
+    PORT = int(os.environ.get('PORT', '8443'))
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"https://upload-abyss-bot.vercel.app/{token}"
+    )
