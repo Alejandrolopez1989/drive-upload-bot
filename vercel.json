@@ -1,8 +1,9 @@
 {
-  "builds": [
-    { "src": "main.py", "use": "@vercel/python" }
-  ],
-  "routes": [
-    { "src": "/(.*)", "dest": "main.py" }
-  ]
+  "build": {
+    "commands": ["npm install", "npm run build"]
+  },
+  "routes": [],
+  "env": {
+    "TOKEN": "YOUR_API_TOKEN"
+  }
 }
