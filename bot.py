@@ -516,18 +516,23 @@ async def delete_file(client: Client, message: Message):
         await status_message.edit_text("❌ Error al eliminar el video de tu Google Drive.")
 
 # --- Manejador para correos de usuarios ---
-@app_telegram.on_message(filters.text & filters.private & ~filters.me)
+@app_telegram.on_message(filters.text & filters.private & ~filters.me & ~filters.regex(r"^/"))
 async def handle_user_email(client: Client, message: Message):
     user_id = message.from_user.id
-    if user_id == ADMIN_TELEGRAM_ID:
-        return
+    # Ya no necesitamos el 'if' para ADMIN_TELEGRAM_ID porque el filtro ~filters.regex(r"^/") lo excluye
+    # if user_id == ADMIN_TELEGRAM_ID:
+    #     return
+
     if is_user_authenticated(user_id) or user_id in approved_users:
         return
+
     user_name = message.from_user.first_name or message.from_user.username or "Usuario"
     text = message.text.strip()
+
     if "@" in text and "." in text and " " not in text:
         email = text
         pending_emails[user_id] = email
+
         if ADMIN_TELEGRAM_ID:
             try:
                 user_mention = message.from_user.username
@@ -542,6 +547,14 @@ async def handle_user_email(client: Client, message: Message):
                     f"y luego usa `/aprobar_usuario {user_id}`."
                 )
                 await client.send_message(ADMIN_TELEGRAM_ID, admin_msg, parse_mode=enums.ParseMode.MARKDOWN)
+                await message.reply_text("✅ Correo recibido. El administrador ha sido notificado.")
+            except Exception as e:
+                logger.error(f"Error notificando admin: {e}")
+                await message.reply_text("❌ Error al procesar tu correo.")
+        else:
+             await message.reply_text("⚠️ El administrador no ha configurado su ID.")
+    else:
+         await message.reply_text("Por favor, envíame únicamente tu correo de Google. Ej: `tu@gmail.com`", parse_mode=enums.ParseMode.MARKDOWN)
                 await message.reply_text("✅ Correo recibido. El administrador ha sido notificado.")
             except Exception as e:
                 logger.error(f"Error notificando admin: {e}")
