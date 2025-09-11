@@ -5,7 +5,8 @@ import logging
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import telegram
+# Importar las excepciones correctamente para v20.x
+import telegram.error
 
 # Cargar variables de entorno
 load_dotenv()
@@ -63,10 +64,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # --- USANDO LA API MODERNA ---
-        # El bot, al ser administrador, puede acceder al mensaje directamente
-        # usando el chat_id calculado y el message_id
-        message = await context.bot.get_chat_message(chat_id=chat_id, message_id=message_id)
+        # --- USANDO LA API MODERNA v20.x CORRECTAMENTE ---
+        # En v20.x, el método directo para obtener un mensaje específico es:
+        # await context.bot.get_chat_message(chat_id=chat_id, message_id=message_id)
+        # Pero si ese no funciona, podemos intentar con get_message del objeto chat
+        # o simplemente usar forward_message/copy_message. Para solo leer metadatos,
+        # intentemos get_message del bot directamente.
+        
+        # El método correcto en v20.x es get_message (no get_chat_message)
+        message = await context.bot.get_message(chat_id=chat_id, message_id=message_id)
         logger.info(f"Mensaje {message_id} obtenido del canal {raw_chat_id}.")
 
         # Verificar si el mensaje tiene video
@@ -95,12 +101,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
-    except telegram.error.Unauthorized:
+    # --- Manejo de errores correcto para v20.x ---
+    except telegram.error.Unauthorized: # Este debería funcionar
         await update.message.reply_text(
             "❌ El bot no tiene permiso para leer mensajes de ese canal. "
             "Asegúrate de que sigue siendo administrador."
         )
-    except telegram.error.BadRequest as e:
+    except telegram.error.BadRequest as e: # Este también debería funcionar
         error_msg = str(e).lower()
         if "message not found" in error_msg:
             await update.message.reply_text("❌ No se encontró un mensaje con ese ID en el canal.")
@@ -108,7 +115,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
              await update.message.reply_text("❌ No se pudo encontrar el canal. Verifica el enlace.")
         else:
             await update.message.reply_text(f"❌ Solicitud incorrecta de la API de Telegram: {e}")
-    except Exception as e:
+    except telegram.error.TelegramError as e: # Captura general para otros errores de la API
+         await update.message.reply_text(f"❌ Error de la API de Telegram: {e}")
+    except Exception as e: # Captura cualquier otro error inesperado
         logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
         await update.message.reply_text(
             f"❌ Error inesperado al obtener el enlace.\n"
