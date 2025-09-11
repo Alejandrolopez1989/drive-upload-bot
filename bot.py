@@ -32,8 +32,8 @@ except (ValueError, TypeError):
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "telegramprueba30@gmail.com")
 
 # --- CONFIGURACIÓN DE GOOGLE DRIVE ---
-SCOPES = ['https://www.googleapis.com/auth/drive']
-RENDER_REDIRECT_URI = "https://google-drive-vip.onrender.com/oauth2callback" # <-- Reemplaza
+SCOPES = ['https://www.googleapis.com/auth/drive'] # <-- Corregido
+RENDER_REDIRECT_URI = "https://google-drive-vip.onrender.com/oauth2callback" # <-- Corregido
 
 # --- Inicialización ---
 app_quart = Quart(__name__)
@@ -153,6 +153,7 @@ async def upload_to_drive_with_progress(user_id, file_path, file_name, progress_
         raise e
 
 def get_file_url(file_id):
+    # <-- Corregido
     return f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
 
 def list_drive_videos(user_id):
@@ -516,14 +517,9 @@ async def delete_file(client: Client, message: Message):
         await status_message.edit_text("❌ Error al eliminar el video de tu Google Drive.")
 
 # --- Manejador para correos de usuarios (CORREGIDO) ---
-# El cambio clave está aquí: ~filters.regex(r"^/") excluye todos los comandos
 @app_telegram.on_message(filters.text & filters.private & ~filters.me & ~filters.regex(r"^/"))
 async def handle_user_email(client: Client, message: Message):
     user_id = message.from_user.id
-    # Ya no necesitamos verificar ADMIN_TELEGRAM_ID aquí gracias al filtro ~filters.regex(r"^/")
-    # if user_id == ADMIN_TELEGRAM_ID:
-    #     return
-
     if is_user_authenticated(user_id) or user_id in approved_users:
         return
 
@@ -562,13 +558,11 @@ async def handle_user_email(client: Client, message: Message):
 async def approve_user_command(client: Client, message: Message):
     logger.info(f"✅ /aprobar_usuario recibido de {message.from_user.id}")
     
-    # Verificación estricta de admin
     if message.from_user.id != ADMIN_TELEGRAM_ID:
         logger.warning(f"❌ Acceso denegado a /aprobar_usuario para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
         await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
         return
 
-    # Parseo del argumento
     command_parts = message.text.strip().split()
     if len(command_parts) < 2:
         await message.reply_text("Uso: `/aprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
@@ -577,7 +571,6 @@ async def approve_user_command(client: Client, message: Message):
 
     try:
         target_user_id_str = command_parts[1]
-        # Validar que sea numérico
         if not target_user_id_str.isdigit():
              raise ValueError("El ID de usuario debe ser un número.")
         target_user_id = int(target_user_id_str)
@@ -591,17 +584,13 @@ async def approve_user_command(client: Client, message: Message):
         await message.reply_text("❌ Error al procesar el ID de usuario.")
         return
 
-    # Lógica de aprobación
     try:
-        # Añadir a la lista de usuarios aprobados
         approved_users.add(target_user_id)
         logger.info(f"✅ Usuario {target_user_id} añadido a approved_users. Total aprobados: {len(approved_users)}")
 
-        # Notificar al administrador
         await message.reply_text(f"✅ Usuario `{target_user_id}` ha sido aprobado.", parse_mode=enums.ParseMode.MARKDOWN)
         logger.info(f"✅ Confirmación de aprobación enviada al admin {ADMIN_TELEGRAM_ID}")
 
-        # Intentar notificar al usuario
         try:
             user_msg = (
                 f"🎉 ¡Hola! El administrador ha aprobado tu solicitud.\n\n"
@@ -618,6 +607,98 @@ async def approve_user_command(client: Client, message: Message):
     except Exception as e:
         logger.error(f"❌ Error en lógica de aprobación para {target_user_id}: {e}", exc_info=True)
         await message.reply_text(f"⚠️ Ocurrió un error al aprobar al usuario: {e}")
+
+# --- Comando para desaprobar (revocar) usuarios ---
+@app_telegram.on_message(filters.command("desaprobar_usuario") & filters.private)
+async def revoke_user_command(client: Client, message: Message):
+    logger.info(f"✅ /desaprobar_usuario recibido de {message.from_user.id}")
+
+    # Verificación estricta de admin
+    if message.from_user.id != ADMIN_TELEGRAM_ID:
+        logger.warning(f"❌ Acceso denegado a /desaprobar_usuario para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
+        await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
+        return
+
+    # Parseo del argumento
+    command_parts = message.text.strip().split()
+    if len(command_parts) < 2:
+        await message.reply_text("Uso: `/desaprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
+        logger.info("❌ /desaprobar_usuario usado sin argumentos")
+        return
+
+    try:
+        target_user_id_str = command_parts[1]
+        # Validar que sea numérico
+        if not target_user_id_str.isdigit():
+             raise ValueError("El ID de usuario debe ser un número.")
+        target_user_id = int(target_user_id_str)
+        logger.info(f"✅ user_id objetivo para desaprobación: {target_user_id}")
+    except (ValueError, IndexError) as e:
+        logger.error(f"❌ Error parseando user_id para desaprobación: {e}")
+        await message.reply_text("❌ El ID de usuario debe ser un número válido.")
+        return
+    except Exception as e:
+        logger.error(f"❌ Error inesperado parseando user_id para desaprobación: {e}")
+        await message.reply_text("❌ Error al procesar el ID de usuario.")
+        return
+
+    # Lógica de desaprobación
+    try:
+        # Verificar si el usuario está aprobado
+        if target_user_id not in approved_users:
+            await message.reply_text(f"⚠️ El usuario `{target_user_id}` no está en la lista de usuarios aprobados.", parse_mode=enums.ParseMode.MARKDOWN)
+            logger.info(f"⚠️ Intento de desaprobar usuario no aprobado: {target_user_id}")
+            return
+
+        # Eliminar de la lista de usuarios aprobados
+        approved_users.discard(target_user_id) # discard() no lanza error si no existe
+        logger.info(f"✅ Usuario {target_user_id} eliminado de approved_users. Total aprobados: {len(approved_users)}")
+
+        # Opcional: Eliminar también su correo pendiente si existe
+        pending_email = pending_emails.pop(target_user_id, None)
+        if pending_email:
+            logger.info(f"ℹ️ Correo pendiente eliminado para {target_user_id}: {pending_email}")
+
+        # Opcional: Eliminar sus credenciales si las tiene (para forzar re-autenticación)
+        user_credentials.pop(target_user_id, None)
+        logger.info(f"ℹ️ Credenciales eliminadas para {target_user_id} (si existían).")
+
+        # Notificar al administrador
+        await message.reply_text(
+            f"✅ Usuario `{target_user_id}` ha sido **desaprobado**.\n"
+            f"Ahora deberá enviar su correo nuevamente y ser aprobado para poder autenticarse.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+        logger.info(f"✅ Confirmación de desaprobación enviada al admin {ADMIN_TELEGRAM_ID}")
+
+    except Exception as e:
+        logger.error(f"❌ Error en lógica de desaprobación para {target_user_id}: {e}", exc_info=True)
+        await message.reply_text(f"⚠️ Ocurrió un error al desaprobar al usuario: {e}")
+
+
+# --- Comando para listar usuarios aprobados ---
+@app_telegram.on_message(filters.command("lista_aprobados") & filters.private)
+async def list_approved_users_command(client: Client, message: Message):
+    logger.info(f"✅ /lista_aprobados recibido de {message.from_user.id}")
+
+    # Verificación estricta de admin
+    if message.from_user.id != ADMIN_TELEGRAM_ID:
+        logger.warning(f"❌ Acceso denegado a /lista_aprobados para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
+        await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
+        return
+
+    if not approved_users:
+        await message.reply_text("ℹ️ La lista de usuarios aprobados está vacía.")
+        return
+
+    response_text = f"**Lista de usuarios aprobados ({len(approved_users)}):**\n"
+    for user_id in approved_users:
+        # Opcional: intentar obtener información del usuario si es posible (requiere permisos)
+        response_text += f"- `{user_id}`\n"
+
+    await message.reply_text(response_text, parse_mode=enums.ParseMode.MARKDOWN)
+    logger.info(f"✅ Lista de aprobados enviada al admin {ADMIN_TELEGRAM_ID}")
+
 
 # --- Rutas Web OAuth ---
 @app_quart.route('/')
