@@ -239,7 +239,8 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if not creds_
+        # <-- Corrección aquí
+        if not creds_data:
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
         try:
@@ -284,7 +285,8 @@ async def drive_login_command(client: Client, message: Message):
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_
+    # <-- Corrección aquí
+    if not creds_data:
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
             try:
@@ -726,7 +728,8 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_
+    # <-- Corrección aquí
+    if not creds_data:
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
 
     try:
