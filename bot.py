@@ -32,7 +32,7 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- FORZAR LA URI DE REDIRECCIÓN ---
 # Reemplaza TU_NOMBRE_DE_SERVICIO_EN_RENDER con el nombre real de tu servicio en Render
-RENDER_REDIRECT_URI = "https://google-drive-vip.onrender.com/oauth2callback"
+RENDER_REDIRECT_URI = "https://TU_NOMBRE_DE_SERVICIO_EN_RENDER.onrender.com/oauth2callback"
 
 # --- Inicialización ---
 app_quart = Quart(__name__)
@@ -47,6 +47,10 @@ user_credentials = {}
 
 # Diccionario para asociar 'state' de OAuth con user_id temporalmente
 login_states = {}
+
+# Diccionarios para gestión de usuarios pendientes y aprobados
+pending_emails = {}  # {user_id: email}
+approved_users = set() # {user_id, ...}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -235,6 +239,7 @@ def delete_from_drive(file_id, user_id): # <-- Pasar user_id
         return False
 
 # --- Manejadores de Pyrogram (Telegram) ---
+
 @app_telegram.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
     welcome_text = (
@@ -269,6 +274,33 @@ async def drive_login_command(client: Client, message: Message):
         await message.reply_text("✅ Tu cuenta de Google Drive ya está conectada.")
         return
 
+    # Verificar si el usuario ha sido aprobado por el administrador
+    if user_id not in approved_users:
+        # Verificar si ya envió su correo
+        if user_id in pending_emails:
+            await message.reply_text(
+                f"Hola {user_name}!\n"
+                "Ya has enviado tu correo. El administrador ha sido notificado.\n"
+                "Por favor, espera a que el administrador te agregue como 'Usuario de prueba' en Google Cloud Console.\n"
+                "Una vez hecho eso, el administrador usará un comando para indicar que puedes continuar.\n"
+                "Te avisaremos cuando puedas proceder a obtener el enlace de autenticación."
+            )
+        else:
+            # Primer intento o no ha enviado correo
+            await message.reply_text(
+                f"Hola {user_name}!\n\n"
+                "Para conectar tu Google Drive, sigue estos pasos:\n\n"
+                "1️⃣ **Envíame (al bot) únicamente tu dirección de correo electrónico de Google** que deseas usar para Drive. "
+                "(Ejemplo: `tu_correo@gmail.com`)\n"
+                "2️⃣ El administrador recibirá una notificación con tu solicitud, tu ID y tu correo.\n"
+                "3️⃣ El administrador agregará ese correo a 'Usuarios de prueba' en Google Cloud Console.\n"
+                "4️⃣ El administrador te notificará cuando estés listo para continuar.\n\n"
+                "**Importante:** No intentes usar `/drive_login` para obtener el enlace de autenticación hasta "
+                "que el administrador te confirme que has sido agregado. "
+            )
+        return # Salir, no mostrar el enlace aún
+
+    # Si el usuario está aprobado, proceder con el flujo normal de OAuth
     # Generar un 'state' único para esta solicitud
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id # Asociar state con user_id
@@ -299,31 +331,13 @@ async def drive_login_command(client: Client, message: Message):
 
         login_url = authorization_url
 
-        # --- Notificación al Administrador ---
-        if ADMIN_TELEGRAM_ID:
-            try:
-                admin_msg = (
-                    f"🔔 **Nuevo intento de login de usuario:**\n"
-                    f"**Nombre:** {user_name}\n"
-                    f"**ID de Telegram:** `{user_id}`\n"
-                    f"**Acción requerida:** Agrega el correo de este usuario a 'Usuarios de prueba' en Google Cloud Console.\n"
-                    f"**Estado del proceso:** El usuario ha sido redirigido al enlace de Google. Una vez agregado, podrá completar la autenticación si vuelve a hacer clic en el enlace o reintentar /drive_login."
-                )
-                await client.send_message(ADMIN_TELEGRAM_ID, admin_msg, parse_mode=enums.ParseMode.MARKDOWN)
-            except Exception as e:
-               logger.error(f"Error al notificar al admin sobre nuevo login: {e}")
-               # Opcional: Informar al usuario que hubo un problema notificando al admin
-               # await message.reply_text("⚠️ Hubo un problema notificando al administrador. Contacta con soporte.")
-
-        # --- Mensaje al Usuario ---
+        # --- Mensaje al Usuario (cuando ya está aprobado) ---
         await message.reply_text(
-            f"Hola {user_name}!\n\n"
-            "Para conectar tu Google Drive, primero el administrador debe agregarte como 'Usuario de prueba'.\n"
-            "Se ha notificado al administrador. Una vez te agregue, podrás completar la autenticación.\n\n"
+            f"✅ ¡Hola {user_name}! Has sido aprobado para conectar tu Google Drive.\n\n"
             "**Haz clic en el siguiente enlace para iniciar el proceso de autenticación con Google:**\n"
             f"{login_url}\n\n"
-            "**Importante:** El enlace solo funcionará después de que el administrador te haya agregado como usuario de prueba en Google Cloud Console. Si el enlace falla, espera la confirmación del administrador y vuelve a intentar `/drive_login`.\n"
-            "*(Este mensaje se muestra siempre que intentes /drive_login si no estás autenticado)*"
+            "**Importante:** Este enlace solo funcionará porque el administrador te ha agregado como usuario de prueba. "
+            "Si por algún motivo el enlace falla, intenta ejecutar `/drive_login` nuevamente."
         )
 
     except Exception as e:
@@ -610,6 +624,99 @@ async def delete_file(client: Client, message: Message):
         await status_message.edit_text("✅ Video eliminado exitosamente de tu Google Drive.")
     else:
         await status_message.edit_text("❌ Error al eliminar el video de tu Google Drive o el video no existe.")
+
+
+# --- Nuevo manejador para recibir el correo del usuario ---
+@app_telegram.on_message(filters.text & filters.private & ~filters.me)
+async def handle_user_email(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or message.from_user.username or "Usuario"
+    text = message.text.strip()
+
+    # Solo procesar si el usuario no está autenticado ni aprobado
+    if is_user_authenticated(user_id) or user_id in approved_users:
+        # Si ya está autenticado o aprobado, ignoramos el texto
+        # O podrías enviar un mensaje de que ya está todo listo
+        return
+
+    # Verificar si parece un correo electrónico válido (básico)
+    if "@" in text and "." in text and " " not in text:
+        email = text
+        pending_emails[user_id] = email
+
+        # Notificar al administrador
+        if ADMIN_TELEGRAM_ID:
+            try:
+                admin_msg = (
+                    f"📧 **Nuevo correo recibido para aprobación:**\n"
+                    f"**Nombre:** {user_name}\n"
+                    f"**ID de Telegram:** `{user_id}`\n"
+                    f"**Correo proporcionado:** `{email}`\n\n"
+                    f"**Acción requerida:** Agrega este correo a 'Usuarios de prueba' en Google Cloud Console "
+                    f"y luego usa el comando `/aprobar_usuario {user_id}` para permitirle acceder al enlace de autenticación."
+                )
+                await client.send_message(ADMIN_TELEGRAM_ID, admin_msg, parse_mode=enums.ParseMode.MARKDOWN)
+                await message.reply_text("✅ Correo recibido. Se ha notificado al administrador. "
+                                        "Una vez te agregue como usuario de prueba, podrás continuar con la autenticación.")
+            except Exception as e:
+                logger.error(f"Error al procesar correo o notificar admin: {e}")
+                await message.reply_text("❌ Hubo un error al procesar tu correo. Inténtalo de nuevo más tarde.")
+        else:
+             await message.reply_text("⚠️ El administrador no ha configurado su ID. No se puede procesar tu solicitud.")
+    else:
+         # Si no es un correo válido, recordarle la instrucción
+         await message.reply_text("Por favor, envíame únicamente tu dirección de correo electrónico de Google. "
+                                 "Por ejemplo: `tu_correo@gmail.com`", parse_mode=enums.ParseMode.MARKDOWN)
+
+# --- Nuevo comando para el administrador para aprobar usuarios ---
+@app_telegram.on_message(filters.command("aprobar_usuario") & filters.private)
+async def approve_user_command(client: Client, message: Message):
+    # Verificar que el que ejecuta el comando es el administrador
+    if message.from_user.id != ADMIN_TELEGRAM_ID:
+        await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
+        return
+
+    # Extraer el user_id del argumento del comando
+    command_parts = message.text.split()
+    if len(command_parts) < 2:
+        await message.reply_text("Uso: `/aprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
+        return
+
+    try:
+        target_user_id = int(command_parts[1])
+    except ValueError:
+        await message.reply_text("❌ El ID de usuario debe ser un número.")
+        return
+
+    # Verificar si el usuario tiene un correo pendiente
+    if target_user_id not in pending_emails:
+        await message.reply_text(f"⚠️ No hay un correo pendiente para el usuario `{target_user_id}`. "
+                                f"Asegúrate de que el usuario haya enviado su correo primero.",
+                                parse_mode=enums.ParseMode.MARKDOWN)
+        return
+
+    user_email = pending_emails.get(target_user_id)
+    # Marcar al usuario como aprobado
+    approved_users.add(target_user_id)
+    # Opcional: Eliminar el correo pendiente si ya no se necesita
+    # del pending_emails[target_user_id]
+
+    # Notificar al administrador
+    await message.reply_text(f"✅ Usuario `{target_user_id}` aprobado. "
+                            f"Se le ha notificado que puede proceder con `/drive_login`.")
+
+    # Notificar al usuario
+    try:
+        user_msg = (
+            f"🎉 ¡Hola! El administrador ha aprobado tu solicitud.\n\n"
+            f"Ahora puedes continuar con el proceso de autenticación.\n"
+            f"Por favor, usa el comando `/drive_login` nuevamente para obtener el enlace de autenticación con Google."
+        )
+        await client.send_message(target_user_id, user_msg)
+    except Exception as e:
+        logger.error(f"Error al notificar al usuario {target_user_id} de aprobación: {e}")
+        await message.reply_text(f"⚠️ El usuario fue aprobado, pero no se pudo enviarle el mensaje de confirmación: {e}")
+
 
 # --- Rutas Web para Autenticación OAuth ---
 @app_quart.route('/')
