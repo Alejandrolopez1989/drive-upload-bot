@@ -22,6 +22,10 @@ API_ID = int(os.environ.get("TELEGRAM_API_ID"))
 API_HASH = os.environ.get("TELEGRAM_API_HASH")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
+# --- CONFIGURACIÓN DEL ADMINISTRADOR ---
+# Se obtiene de la variable de entorno. Asegúrate de configurarla en Render.
+ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", 0)) # 0 por defecto si no está configurada
+
 # --- CONFIGURACIÓN DE GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
 # TOKEN_FILE ya no se usa como archivo único
@@ -258,6 +262,9 @@ async def set_bot_commands(client: Client):
 @app_telegram.on_message(filters.command("drive_login"))
 async def drive_login_command(client: Client, message: Message):
     user_id = message.from_user.id
+    user_name = message.from_user.first_name or message.from_user.username or "Usuario"
+
+    # Verificar si ya está autenticado
     if is_user_authenticated(user_id):
         await message.reply_text("✅ Tu cuenta de Google Drive ya está conectada.")
         return
@@ -269,6 +276,12 @@ async def drive_login_command(client: Client, message: Message):
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if not creds_data: # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales de Google no configuradas.")
+        # Notificar al admin del error crítico
+        if ADMIN_TELEGRAM_ID:
+            try:
+                await client.send_message(ADMIN_TELEGRAM_ID, f"❌ Error crítico en /drive_login: GOOGLE_CREDENTIALS_JSON no configuradas.")
+            except Exception as e:
+                logger.error(f"Error al notificar al admin: {e}")
         return
 
     try:
@@ -285,13 +298,43 @@ async def drive_login_command(client: Client, message: Message):
             state=state)
 
         login_url = authorization_url
+
+        # --- Notificación al Administrador ---
+        if ADMIN_TELEGRAM_ID:
+            try:
+                admin_msg = (
+                    f"🔔 **Nuevo intento de login de usuario:**\n"
+                    f"**Nombre:** {user_name}\n"
+                    f"**ID de Telegram:** `{user_id}`\n"
+                    f"**Acción requerida:** Agrega el correo de este usuario a 'Usuarios de prueba' en Google Cloud Console.\n"
+                    f"**Estado del proceso:** El usuario ha sido redirigido al enlace de Google. Una vez agregado, podrá completar la autenticación si vuelve a hacer clic en el enlace o reintentar /drive_login."
+                )
+                await client.send_message(ADMIN_TELEGRAM_ID, admin_msg, parse_mode=enums.ParseMode.MARKDOWN)
+            except Exception as e:
+               logger.error(f"Error al notificar al admin sobre nuevo login: {e}")
+               # Opcional: Informar al usuario que hubo un problema notificando al admin
+               # await message.reply_text("⚠️ Hubo un problema notificando al administrador. Contacta con soporte.")
+
+        # --- Mensaje al Usuario ---
         await message.reply_text(
-            "Por favor, haz clic en el siguiente enlace para conectar tu cuenta de Google Drive:\n"
-            f"{login_url}"
+            f"Hola {user_name}!\n\n"
+            "Para conectar tu Google Drive, primero el administrador debe agregarte como 'Usuario de prueba'.\n"
+            "Se ha notificado al administrador. Una vez te agregue, podrás completar la autenticación.\n\n"
+            "**Haz clic en el siguiente enlace para iniciar el proceso de autenticación con Google:**\n"
+            f"{login_url}\n\n"
+            "**Importante:** El enlace solo funcionará después de que el administrador te haya agregado como usuario de prueba en Google Cloud Console. Si el enlace falla, espera la confirmación del administrador y vuelve a intentar `/drive_login`.\n"
+            "*(Este mensaje se muestra siempre que intentes /drive_login si no estás autenticado)*"
         )
+
     except Exception as e:
         logger.error(f"Error al iniciar login para el usuario {user_id}: {e}")
         await message.reply_text("❌ Ocurrió un error al iniciar el proceso de login. Inténtalo de nuevo más tarde.")
+        # Notificar al admin del error
+        if ADMIN_TELEGRAM_ID:
+            try:
+                await client.send_message(ADMIN_TELEGRAM_ID, f"❌ Error en /drive_login para usuario {user_id} ({user_name}): {e}")
+            except Exception as ee:
+                logger.error(f"Error al notificar al admin del error de login: {ee}")
     finally:
         if os.path.exists('credentials_temp.json'):
             os.remove('credentials_temp.json')
