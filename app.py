@@ -34,10 +34,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_streaming_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Obtiene el enlace de streaming de un video en un canal."""
-    user_id = update.effective_user.id
-    # Opcional: Restringir el uso a tu user_id
-    # TU_USER_ID = int(os.getenv('TU_USER_ID', 0)) # Añade TU_USER_ID a .env
-    # if TU_USER_ID and user_id != TU_USER_ID:
+    # Opcional: Restringir el uso a tu user_id (añade TU_USER_ID a las variables de entorno de Render)
+    # TU_USER_ID = int(os.getenv('TU_USER_ID', 0))
+    # if TU_USER_ID and update.effective_user.id != TU_USER_ID:
     #     await update.message.reply_text("❌ No tienes permiso para usar este comando.")
     #     return
 
@@ -57,7 +56,7 @@ async def get_streaming_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        # 1. Obtener el chat_id del canal (verifica que el bot esté en el canal o tenga acceso)
+        # 1. Obtener el chat_id del canal
         chat = await context.bot.get_chat(channel_username)
         chat_id = chat.id
         logger.info(f"Accediendo al canal: {channel_username} (ID: {chat_id})")
