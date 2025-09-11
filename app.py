@@ -1,12 +1,13 @@
 # app.py
 import os
+import re
 import logging
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 import telegram
 
-# Cargar variables de entorno
+# --- Cargar variables de entorno ---
 load_dotenv()
 
 # --- Configuración de Logs ---
@@ -18,18 +19,40 @@ logger = logging.getLogger(__name__)
 
 # --- Configuración de Variables de Entorno ---
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-CANAL_ID_STR = os.getenv('CANAL_ID') # Ej: -100123456789
+# Credenciales para Telethon (misma que usaste en auth.py)
+API_ID = int(os.getenv('TELEGRAM_API_ID'))
+API_HASH = os.getenv('TELEGRAM_API_HASH')
+PHONE_NUMBER = os.getenv('PHONE_NUMBER') # Nuevo: Número de teléfono para Telethon
 
 if not TOKEN:
     raise ValueError("Por favor, establece la variable de entorno TELEGRAM_BOT_TOKEN")
-if not CANAL_ID_STR:
-    raise ValueError("Por favor, establece la variable de entorno CANAL_ID (ej: -100123456789)")
+if not API_ID or not API_HASH:
+    raise ValueError("Por favor, establece TELEGRAM_API_ID y TELEGRAM_API_HASH en las variables de entorno.")
+if not PHONE_NUMBER:
+    raise ValueError("Por favor, establece PHONE_NUMBER en las variables de entorno (tu número de teléfono).")
 
-# Convertir el ID a entero
-try:
-    CANAL_ID = int(CANAL_ID_STR)
-except ValueError:
-    raise ValueError("CANAL_ID debe ser un número entero (incluyendo el -100).")
+# --- Inicializar cliente de Telethon ---
+# Asegurarse de que el archivo de sesión esté en la carpeta correcta
+from telethon import TelegramClient
+
+# Nombre del archivo de sesión
+SESSION_NAME = 'bot_session'
+
+# Crear cliente Telethon
+telethon_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+
+# --- Funciones auxiliares ---
+def parse_private_link(link: str):
+    """Extrae chat_id y message_id de un enlace privado de Telegram."""
+    # Enlace tipo: https://t.me/c/123456789/1122
+    match = re.match(r"https?://t\.me/c/(\d+)/(\d+)", link)
+    if match:
+        raw_chat_id = match.group(1)
+        message_id = int(match.group(2))
+        # Para canales/grupos privados, el ID real es -100 seguido del ID corto
+        chat_id = int(f"-100{raw_chat_id}")
+        return chat_id, message_id
+    return None, None
 
 # --- Funciones del Bot ---
 def start(update: Update, context: CallbackContext):
@@ -37,110 +60,102 @@ def start(update: Update, context: CallbackContext):
     user = update.effective_user
     update.message.reply_text(
         f"Hola {user.first_name}!\n\n"
-        f"📌 Canal configurado: ID {CANAL_ID}\n\n"
-        "Usa el comando:\n"
-        f"/getlink <message_id>\n\n"
-        "Ejemplo: /getlink 1234\n"
-        "Te daré el enlace de streaming del video en ese mensaje (debe ser un video)."
+        "Envíame el enlace de un mensaje de video en tu canal.\n"
+        "Ejemplo: `https://t.me/c/123456789/1122`\n"
+        "Te devolveré el `file_id` de ese video.",
+        parse_mode='Markdown'
     )
 
-def get_streaming_link(update: Update, context: CallbackContext):
-    """Obtiene el enlace de streaming de un video en el canal administrado."""
-    if not context.args or len(context.args) != 1:
-        update.message.reply_text(
-            "❌ Uso incorrecto.\n"
-            "Usa: /getlink <message_id>\n"
-            "Ejemplo: /getlink 1234"
-        )
+def handle_message(update: Update, context: CallbackContext):
+    """Maneja los mensajes de texto (enlaces) enviados por el usuario."""
+    user_message = update.message.text
+
+    if not user_message.startswith("http"):
+        update.message.reply_text("Por favor, envíame un enlace de Telegram válido.")
         return
 
-    try:
-        message_id = int(context.args[0])
-    except ValueError:
-        update.message.reply_text("❌ El <message_id> debe ser un número.")
+    chat_id, message_id = parse_private_link(user_message)
+
+    if not chat_id or not message_id:
+        update.message.reply_text("❌ Enlace no válido. Usa el formato `https://t.me/c/...`", parse_mode='Markdown')
         return
 
-    forwarded_message = None # Para poder borrarlo en el finally
+    # Usar Telethon para obtener el mensaje
+    import asyncio
+    async def get_file_id():
+        try:
+            # Asegurar que Telethon esté conectado
+            if not telethon_client.is_connected():
+                await telethon_client.connect()
+            
+            # Obtener el mensaje usando Telethon
+            message = await telethon_client.get_messages(chat_id, ids=message_id)
+            
+            if not message:
+                return "❌ Mensaje no encontrado."
+            
+            if not hasattr(message, 'video') or not message.video:
+                return "❌ El mensaje no contiene un video."
+            
+            file_id = message.video.id
+            file_size_bytes = message.video.size
+            file_size_mb = file_size_bytes / (1024 * 1024)
 
-    try:
-        # --- Reenviar el mensaje del canal al chat del usuario ---
-        forwarded_message = context.bot.forward_message(
-            chat_id=update.effective_chat.id,
-            from_chat_id=CANAL_ID,
-            message_id=message_id
-        )
-        logger.info(f"Mensaje {message_id} reenviado del canal {CANAL_ID}.")
-
-        # Verificar si el mensaje reenviado tiene video
-        if not forwarded_message or not forwarded_message.video:
-            update.message.reply_text("❌ El mensaje reenviado no contiene un video.")
-            return
-
-        video = forwarded_message.video
-        file_id = video.file_id
-        file_size_bytes = video.file_size
-
-        # Obtener la ruta del archivo usando getFile
-        file_info = context.bot.get_file(file_id=file_id)
-        file_path = file_info.file_path
-
-        # Construir el enlace de streaming
-        streaming_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-
-        # Enviar el enlace al usuario
-        file_size_mb = file_size_bytes / (1024 * 1024)
-        update.message.reply_text(
-            f"✅ *¡Enlace de streaming obtenido!*\n\n"
-            f"🔗 [Ver Video]({streaming_url})\n\n"
-            f"📁 Tamaño: {file_size_mb:.2f} MB\n"
-            f"🆔 File ID: `{file_id}`",
-            parse_mode='Markdown'
-        )
-
-    except telegram.error.Unauthorized:
-        update.message.reply_text(
-            "❌ El bot no tiene permiso para leer o reenviar mensajes de ese canal. "
-            "Asegúrate de que sigue siendo administrador con permisos de lectura."
-        )
-    except telegram.error.BadRequest as e:
-        error_msg = str(e).lower()
-        if "message to.forward not found" in error_msg:
-            update.message.reply_text("❌ No se encontró un mensaje con ese ID en el canal.")
-        elif "chat not found" in error_msg:
-             update.message.reply_text("❌ No se pudo encontrar el canal. Verifica el CANAL_ID.")
-        else:
-            update.message.reply_text(f"❌ Solicitud incorrecta de la API de Telegram: {e}")
-    except Exception as e:
-        logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
-        update.message.reply_text(
-            f"❌ Error inesperado al obtener el enlace.\n"
-            f"Detalles: {e}\n\n"
-            f"Por favor, inténtalo más tarde o revisa la configuración."
-        )
-    finally:
-        # --- Intentar borrar el mensaje reenviado para mantener el chat limpio ---
-        if forwarded_message:
+            # Opcional: Obtener también el enlace de streaming
             try:
-                context.bot.delete_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=forwarded_message.message_id
-                )
-                logger.info(f"Mensaje reenviado {forwarded_message.message_id} borrado.")
+                # Usar la API de bot para getFile
+                bot_file_info = context.bot.get_file(file_id=str(file_id))
+                file_path = bot_file_info.file_path
+                streaming_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+                link_part = f"\n\n🔗 [Ver Video]({streaming_url})"
             except Exception as e:
-                logger.warning(f"No se pudo borrar el mensaje reenviado: {e}")
+                logger.warning(f"No se pudo obtener el enlace de streaming: {e}")
+                link_part = ""
 
+            return (
+                f"✅ *File ID obtenido:*\n`{file_id}`\n\n"
+                f"📁 Tamaño: {file_size_mb:.2f} MB"
+                f"{link_part}"
+            )
+        except Exception as e:
+            logger.error(f"Error al obtener el mensaje con Telethon: {e}", exc_info=True)
+            return f"❌ Error al acceder al mensaje: {e}"
+
+    # Ejecutar la función async de Telethon desde el entorno sync de ptb
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    result_message = loop.run_until_complete(get_file_id())
+    loop.close()
+    
+    update.message.reply_text(result_message, parse_mode='Markdown')
+
+async def start_telethon_client():
+    """Inicia el cliente de Telethon y maneja la autenticación si es necesario."""
+    try:
+        logger.info("Intentando conectar Telethon...")
+        await telethon_client.start(phone=PHONE_NUMBER)
+        logger.info("Cliente Telethon conectado y autenticado.")
+    except Exception as e:
+        logger.error(f"Error al iniciar Telethon: {e}")
+        # Si hay un error de autenticación, se puede manejar aquí
+        # Por ahora, dejamos que el error se loguee
 
 def main():
     """Inicia el bot."""
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    # Comandos
+    # Comandos y handlers
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("getlink", get_streaming_link))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
+    # Iniciar Telethon de forma asíncrona
+    import asyncio
+    # Creamos una nueva tarea para no bloquear el inicio del bot
+    asyncio.create_task(start_telethon_client())
+    
     # Iniciar el bot
-    logger.info("Iniciando el bot...")
+    logger.info("Iniciando el bot de Telegram...")
     updater.start_polling()
     updater.idle()
 
