@@ -3,7 +3,6 @@ import os
 import re
 import logging
 from dotenv import load_dotenv
-from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 # Importar solo la clase base de errores de la API de Telegram
 from telegram.error import TelegramError
