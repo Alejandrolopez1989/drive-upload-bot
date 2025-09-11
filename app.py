@@ -1,4 +1,4 @@
-# app.py
+# app.py (Versión para canal privado)
 import os
 import logging
 from dotenv import load_dotenv
@@ -17,12 +17,18 @@ logger = logging.getLogger(__name__)
 
 # --- Configuración de Variables de Entorno ---
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-CANAL_NOMBRE = os.getenv('CANAL_NOMBRE') # Ej: @micanal
+CANAL_ID_STR = os.getenv('CANAL_ID') # Ej: -100123456789
 
 if not TOKEN:
     raise ValueError("Por favor, establece la variable de entorno TELEGRAM_BOT_TOKEN")
-if not CANAL_NOMBRE:
-    raise ValueError("Por favor, establece la variable de entorno CANAL_NOMBRE (ej: @micanal)")
+if not CANAL_ID_STR:
+    raise ValueError("Por favor, establece la variable de entorno CANAL_ID (ej: -100123456789)")
+
+# Convertir el ID a entero
+try:
+    CANAL_ID = int(CANAL_ID_STR)
+except ValueError:
+    raise ValueError("CANAL_ID debe ser un número entero (incluyendo el -100).")
 
 # --- Funciones del Bot ---
 def start(update: Update, context: CallbackContext):
@@ -30,7 +36,7 @@ def start(update: Update, context: CallbackContext):
     user = update.effective_user
     update.message.reply_text(
         f"Hola {user.first_name}!\n\n"
-        f"📌 Canal configurado: {CANAL_NOMBRE}\n\n"
+        f"📌 Canal configurado: ID {CANAL_ID}\n\n"
         "Usa el comando:\n"
         f"/getlink <message_id>\n\n"
         "Ejemplo: /getlink 1234\n"
@@ -54,8 +60,8 @@ def get_streaming_link(update: Update, context: CallbackContext):
         return
 
     try:
-        # El bot, al ser administrador, puede acceder al mensaje por su ID
-        message = context.bot.get_message(chat_id=CANAL_NOMBRE, message_id=message_id)
+        # El bot, al ser administrador, puede acceder al mensaje por su ID en un canal privado
+        message = context.bot.get_message(chat_id=CANAL_ID, message_id=message_id)
         logger.info(f"Mensaje obtenido: {message_id}")
 
         # Verificar si el mensaje tiene video
@@ -91,7 +97,8 @@ def get_streaming_link(update: Update, context: CallbackContext):
             f"Asegúrate de:\n"
             f"1. El message_id ({message_id}) es correcto.\n"
             f"2. El mensaje contiene un video.\n"
-            f"3. El bot sigue siendo administrador del canal.\n\n"
+            f"3. El bot sigue siendo administrador del canal.\n"
+            f"4. El CANAL_ID ({CANAL_ID}) es correcto.\n\n"
             f"Error: {e}"
         )
 
