@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 import telegram
 
-# --- Cargar variables de entorno ---
+# Cargar variables de entorno
 load_dotenv()
 
 # --- Configuración de Logs ---
@@ -19,38 +19,22 @@ logger = logging.getLogger(__name__)
 
 # --- Configuración de Variables de Entorno ---
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-# Credenciales para Telethon (misma que usaste en auth.py)
-API_ID = int(os.getenv('TELEGRAM_API_ID'))
-API_HASH = os.getenv('TELEGRAM_API_HASH')
-PHONE_NUMBER = os.getenv('PHONE_NUMBER') # Nuevo: Número de teléfono para Telethon
 
 if not TOKEN:
     raise ValueError("Por favor, establece la variable de entorno TELEGRAM_BOT_TOKEN")
-if not API_ID or not API_HASH:
-    raise ValueError("Por favor, establece TELEGRAM_API_ID y TELEGRAM_API_HASH en las variables de entorno.")
-# PHONE_NUMBER es opcional si ya existe una sesión válida
-
-# --- Inicializar cliente de Telethon ---
-from telethon import TelegramClient
-
-# Nombre del archivo de sesión
-SESSION_NAME = 'bot_session'
-
-# Crear cliente Telethon
-telethon_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 # --- Funciones auxiliares ---
 def parse_private_link(link: str):
-    """Extrae chat_id y message_id de un enlace privado de Telegram."""
+    """Extrae raw_chat_id y message_id de un enlace privado de Telegram."""
     # Enlace tipo: https://t.me/c/123456789/1122
     match = re.match(r"https?://t\.me/c/(\d+)/(\d+)", link)
     if match:
-        raw_chat_id = match.group(1)
-        message_id = int(match.group(2))
+        raw_chat_id = match.group(1) # 123456789
+        message_id = int(match.group(2)) # 1122
         # Para canales/grupos privados, el ID real es -100 seguido del ID corto
-        chat_id = int(f"-100{raw_chat_id}")
-        return chat_id, message_id
-    return None, None
+        chat_id = int(f"-100{raw_chat_id}") # -100123456789
+        return chat_id, message_id, raw_chat_id
+    return None, None, None
 
 # --- Funciones del Bot ---
 def start(update: Update, context: CallbackContext):
@@ -60,7 +44,7 @@ def start(update: Update, context: CallbackContext):
         f"Hola {user.first_name}!\n\n"
         "Envíame el enlace de un mensaje de video en tu canal.\n"
         "Ejemplo: `https://t.me/c/123456789/1122`\n"
-        "Te devolveré el `file_id` de ese video.",
+        "Te devolveré el enlace de streaming de ese video.",
         parse_mode='Markdown'
     )
 
@@ -72,104 +56,67 @@ def handle_message(update: Update, context: CallbackContext):
         update.message.reply_text("Por favor, envíame un enlace de Telegram válido.")
         return
 
-    chat_id, message_id = parse_private_link(user_message)
+    chat_id, message_id, raw_chat_id = parse_private_link(user_message)
 
     if not chat_id or not message_id:
         update.message.reply_text("❌ Enlace no válido. Usa el formato `https://t.me/c/...`", parse_mode='Markdown')
         return
 
-    # Usar Telethon para obtener el mensaje
-    import asyncio
-    
-    async def get_file_id_internal():
-        try:
-            # Asegurar que Telethon esté conectado
-            if not telethon_client.is_connected():
-                # Si no está conectado, intentamos conectar (puede pedir código/password si la sesión no es válida)
-                await telethon_client.connect()
-                # Si necesitara autenticación, esto la dispararía. Pero como ya debería tener el .session, no debería.
-                # Si falla, el error se verá en los logs.
-            
-            # Obtener el mensaje usando Telethon
-            message = await telethon_client.get_messages(chat_id, ids=message_id)
-            
-            if not message:
-                return "❌ Mensaje no encontrado."
-            
-            if not hasattr(message, 'video') or not message.video:
-                return "❌ El mensaje no contiene un video."
-            
-            file_id = message.video.id
-            file_size_bytes = message.video.size
-            file_size_mb = file_size_bytes / (1024 * 1024)
-
-            # Opcional: Obtener también el enlace de streaming
-            try:
-                # Usar la API de bot para getFile
-                bot_file_info = context.bot.get_file(file_id=str(file_id))
-                file_path = bot_file_info.file_path
-                streaming_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-                link_part = f"\n\n🔗 [Ver Video]({streaming_url})"
-            except Exception as e:
-                logger.warning(f"No se pudo obtener el enlace de streaming: {e}")
-                link_part = ""
-
-            return (
-                f"✅ *File ID obtenido:*\n`{file_id}`\n\n"
-                f"📁 Tamaño: {file_size_mb:.2f} MB"
-                f"{link_part}"
-            )
-        except Exception as e:
-            logger.error(f"Error al obtener el mensaje con Telethon: {e}", exc_info=True)
-            return f"❌ Error al acceder al mensaje: {e}"
-
-    # Ejecutar la función async de Telethon desde el entorno sync de ptb
-    # Obtenemos el loop existente o creamos uno nuevo
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-    result_message = loop.run_until_complete(get_file_id_internal())
-    
-    update.message.reply_text(result_message, parse_mode='Markdown')
+        # El bot, al ser administrador, puede acceder al mensaje directamente
+        # usando el chat_id calculado y el message_id
+        message = context.bot.get_message(chat_id=chat_id, message_id=message_id)
+        logger.info(f"Mensaje {message_id} obtenido del canal {raw_chat_id}.")
+
+        # Verificar si el mensaje tiene video
+        if not message or not hasattr(message, 'video') or not message.video:
+            update.message.reply_text("❌ El mensaje no contiene un video.")
+            return
+
+        video = message.video
+        file_id = video.file_id
+        file_size_bytes = video.file_size
+
+        # Obtener la ruta del archivo usando getFile
+        file_info = context.bot.get_file(file_id=file_id)
+        file_path = file_info.file_path
+
+        # Construir el enlace de streaming
+        streaming_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+
+        # Enviar el enlace al usuario
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        update.message.reply_text(
+            f"✅ *¡Enlace de streaming obtenido!*\n\n"
+            f"🔗 [Ver Video]({streaming_url})\n\n"
+            f"📁 Tamaño: {file_size_mb:.2f} MB\n"
+            f"🆔 File ID: `{file_id}`",
+            parse_mode='Markdown'
+        )
+
+    except telegram.error.Unauthorized:
+        update.message.reply_text(
+            "❌ El bot no tiene permiso para leer mensajes de ese canal. "
+            "Asegúrate de que sigue siendo administrador."
+        )
+    except telegram.error.BadRequest as e:
+        error_msg = str(e).lower()
+        if "message not found" in error_msg:
+            update.message.reply_text("❌ No se encontró un mensaje con ese ID en el canal.")
+        elif "chat not found" in error_msg:
+             update.message.reply_text("❌ No se pudo encontrar el canal. Verifica el enlace.")
+        else:
+            update.message.reply_text(f"❌ Solicitud incorrecta de la API de Telegram: {e}")
+    except Exception as e:
+        logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
+        update.message.reply_text(
+            f"❌ Error inesperado al obtener el enlace.\n"
+            f"Detalles: {e}\n\n"
+            f"Por favor, inténtalo más tarde."
+        )
 
 def main():
     """Inicia el bot."""
-    
-    # --- Iniciar y conectar Telethon de forma síncrona ANTES de iniciar el bot ---
-    logger.info("Iniciando cliente Telethon...")
-    import asyncio
-    
-    async def init_telethon():
-        try:
-            # Si PHONE_NUMBER está definido, lo usamos para autenticar si es necesario
-            # Si no, Telethon intentará usar la sesión existente
-            if PHONE_NUMBER:
-                await telethon_client.start(phone=PHONE_NUMBER)
-            else:
-                await telethon_client.start()
-            logger.info("Cliente Telethon conectado y listo.")
-        except Exception as e:
-            logger.error(f"Error crítico al iniciar Telethon: {e}")
-            raise # Relanzar el error para que el despliegue falle si Telethon no puede iniciar
-
-    # Ejecutar la inicialización de Telethon en el loop de asyncio
-    # Esto debe hacerse antes de que el bot de Telegram tome el control del loop
-    try:
-        # Intentar obtener el loop existente
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        # Si no hay loop, crear uno nuevo
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    # Ejecutar la inicialización de Telethon
-    loop.run_until_complete(init_telethon())
-    # --- Fin de la inicialización de Telethon ---
-    
-    # Configurar el bot de Telegram
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
 
@@ -178,7 +125,7 @@ def main():
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
     # Iniciar el bot
-    logger.info("Iniciando el bot de Telegram...")
+    logger.info("Iniciando el bot...")
     updater.start_polling()
     updater.idle()
 
