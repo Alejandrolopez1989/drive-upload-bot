@@ -4,7 +4,7 @@ import re
 import logging
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import telegram
 
 # Cargar variables de entorno
@@ -36,11 +36,11 @@ def parse_private_link(link: str):
         return chat_id, message_id, raw_chat_id
     return None, None, None
 
-# --- Funciones del Bot ---
-def start(update: Update, context: CallbackContext):
+# --- Funciones del Bot (ahora async) ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Envía un mensaje cuando el comando /start es emitido."""
     user = update.effective_user
-    update.message.reply_text(
+    await update.message.reply_text(
         f"Hola {user.first_name}!\n\n"
         "Envíame el enlace de un mensaje de video en tu canal.\n"
         "Ejemplo: `https://t.me/c/123456789/1122`\n"
@@ -48,29 +48,30 @@ def start(update: Update, context: CallbackContext):
         parse_mode='Markdown'
     )
 
-def handle_message(update: Update, context: CallbackContext):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja los mensajes de texto (enlaces) enviados por el usuario."""
     user_message = update.message.text
 
     if not user_message.startswith("http"):
-        update.message.reply_text("Por favor, envíame un enlace de Telegram válido.")
+        await update.message.reply_text("Por favor, envíame un enlace de Telegram válido.")
         return
 
     chat_id, message_id, raw_chat_id = parse_private_link(user_message)
 
     if not chat_id or not message_id:
-        update.message.reply_text("❌ Enlace no válido. Usa el formato `https://t.me/c/...`", parse_mode='Markdown')
+        await update.message.reply_text("❌ Enlace no válido. Usa el formato `https://t.me/c/...`", parse_mode='Markdown')
         return
 
     try:
+        # --- USANDO LA API MODERNA ---
         # El bot, al ser administrador, puede acceder al mensaje directamente
         # usando el chat_id calculado y el message_id
-        message = context.bot.get_message(chat_id=chat_id, message_id=message_id)
+        message = await context.bot.get_chat_message(chat_id=chat_id, message_id=message_id)
         logger.info(f"Mensaje {message_id} obtenido del canal {raw_chat_id}.")
 
         # Verificar si el mensaje tiene video
         if not message or not hasattr(message, 'video') or not message.video:
-            update.message.reply_text("❌ El mensaje no contiene un video.")
+            await update.message.reply_text("❌ El mensaje no contiene un video.")
             return
 
         video = message.video
@@ -78,7 +79,7 @@ def handle_message(update: Update, context: CallbackContext):
         file_size_bytes = video.file_size
 
         # Obtener la ruta del archivo usando getFile
-        file_info = context.bot.get_file(file_id=file_id)
+        file_info = await context.bot.get_file(file_id=file_id)
         file_path = file_info.file_path
 
         # Construir el enlace de streaming
@@ -86,7 +87,7 @@ def handle_message(update: Update, context: CallbackContext):
 
         # Enviar el enlace al usuario
         file_size_mb = file_size_bytes / (1024 * 1024)
-        update.message.reply_text(
+        await update.message.reply_text(
             f"✅ *¡Enlace de streaming obtenido!*\n\n"
             f"🔗 [Ver Video]({streaming_url})\n\n"
             f"📁 Tamaño: {file_size_mb:.2f} MB\n"
@@ -95,21 +96,21 @@ def handle_message(update: Update, context: CallbackContext):
         )
 
     except telegram.error.Unauthorized:
-        update.message.reply_text(
+        await update.message.reply_text(
             "❌ El bot no tiene permiso para leer mensajes de ese canal. "
             "Asegúrate de que sigue siendo administrador."
         )
     except telegram.error.BadRequest as e:
         error_msg = str(e).lower()
         if "message not found" in error_msg:
-            update.message.reply_text("❌ No se encontró un mensaje con ese ID en el canal.")
+            await update.message.reply_text("❌ No se encontró un mensaje con ese ID en el canal.")
         elif "chat not found" in error_msg:
-             update.message.reply_text("❌ No se pudo encontrar el canal. Verifica el enlace.")
+             await update.message.reply_text("❌ No se pudo encontrar el canal. Verifica el enlace.")
         else:
-            update.message.reply_text(f"❌ Solicitud incorrecta de la API de Telegram: {e}")
+            await update.message.reply_text(f"❌ Solicitud incorrecta de la API de Telegram: {e}")
     except Exception as e:
         logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
-        update.message.reply_text(
+        await update.message.reply_text(
             f"❌ Error inesperado al obtener el enlace.\n"
             f"Detalles: {e}\n\n"
             f"Por favor, inténtalo más tarde."
@@ -117,17 +118,16 @@ def handle_message(update: Update, context: CallbackContext):
 
 def main():
     """Inicia el bot."""
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
+    # Crear la aplicación del bot usando la nueva API
+    application = Application.builder().token(TOKEN).build()
 
     # Comandos y handlers
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Iniciar el bot
-    logger.info("Iniciando el bot...")
-    updater.start_polling()
-    updater.idle()
+    logger.info("Iniciando el bot (v20.7)...")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
