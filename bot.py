@@ -290,7 +290,7 @@ async def drive_login_command(client: Client, message: Message):
         login_states[state] = user_id # Asociar state con user_id
 
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if not creds_data: # <-- Corrección aquí
+        if not creds_ # <-- Corrección aquí
             await message.reply_text("❌ Error del servidor: Credenciales de Google no configuradas.")
             return
 
@@ -357,7 +357,7 @@ async def drive_login_command(client: Client, message: Message):
     login_states[state] = user_id # Asociar state con user_id
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_data: # <-- Corrección aquí
+    if not creds_ # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales de Google no configuradas.")
         # Notificar al admin del error crítico
         if ADMIN_TELEGRAM_ID:
@@ -729,38 +729,58 @@ async def handle_user_email(client: Client, message: Message):
 # --- Nuevo comando para el administrador para aprobar usuarios ---
 @app_telegram.on_message(filters.command("aprobar_usuario") & filters.private)
 async def approve_user_command(client: Client, message: Message):
+    logger.info(f"Comando /aprobar_usuario recibido de {message.from_user.id}")
     # Verificar que el que ejecuta el comando es el administrador
     if message.from_user.id != ADMIN_TELEGRAM_ID:
+        logger.warning(f"Usuario {message.from_user.id} intentó usar /aprobar_usuario sin permiso.")
         await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
         return
 
     # Extraer el user_id del argumento del comando
     command_parts = message.text.split()
+    logger.info(f"Partes del comando recibidas: {command_parts}")
     if len(command_parts) < 2:
+        logger.info("Comando /aprobar_usuario usado sin argumentos o incorrectamente.")
         await message.reply_text("Uso: `/aprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
         return
 
     try:
         target_user_id = int(command_parts[1])
-    except ValueError:
+        logger.info(f"User ID objetivo convertido: {target_user_id}")
+    except ValueError as ve:
+        logger.error(f"Error al convertir user_id: {ve}")
         await message.reply_text("❌ El ID de usuario debe ser un número.")
         return
+    except Exception as e:
+        logger.error(f"Error inesperado al procesar user_id: {e}")
+        await message.reply_text("❌ Error al procesar el ID de usuario.")
+        return
 
-    # --- Corrección: Asegurar aprobación y notificación ---
-    # Verificar si el usuario tiene un correo pendiente (para información)
-    user_email = pending_emails.get(target_user_id, "No proporcionado")
+    try:
+        # --- Corrección: Asegurar aprobación y notificación ---
+        # Verificar si el usuario tiene un correo pendiente (para información)
+        user_email = pending_emails.get(target_user_id, "No proporcionado")
+        logger.info(f"Correo pendiente para {target_user_id}: {user_email}")
 
-    # Marcar al usuario como aprobado (independientemente de si tenía correo pendiente)
-    approved_users.add(target_user_id)
+        # Marcar al usuario como aprobado (independientemente de si tenía correo pendiente)
+        approved_users.add(target_user_id)
+        logger.info(f"Usuario {target_user_id} agregado a approved_users.")
 
-    # Opcional: Eliminar el correo pendiente si ya no se necesita
-    # pending_emails.pop(target_user_id, None)
+        # Opcional: Eliminar el correo pendiente si ya no se necesita
+        # correo_eliminado = pending_emails.pop(target_user_id, None)
+        # logger.info(f"Correo pendiente eliminado para {target_user_id}: {correo_eliminado}")
 
-    # Notificar al administrador
-    await message.reply_text(f"✅ Usuario `{target_user_id}` aprobado. "
-                            f"Se le ha notificado que puede proceder con `/drive_login`.")
+        # Notificar al administrador
+        confirm_msg_admin = f"✅ Usuario `{target_user_id}` aprobado. Se le ha notificado (o se intentó notificar)."
+        await message.reply_text(confirm_msg_admin)
+        logger.info(f"Mensaje de confirmación enviado al admin {ADMIN_TELEGRAM_ID}.")
 
-    # Notificar al usuario
+    except Exception as e:
+        logger.error(f"Error al aprobar usuario {target_user_id} o notificar al admin: {e}", exc_info=True)
+        await message.reply_text(f"⚠️ Ocurrió un error al aprobar al usuario: {e}")
+        return # Salir si hay un error en esta etapa
+
+    # Notificar al usuario objetivo (fuera del try-except principal para manejar errores de envío)
     try:
         user_msg = (
             f"🎉 ¡Hola! El administrador ha aprobado tu solicitud.\n\n"
@@ -768,10 +788,13 @@ async def approve_user_command(client: Client, message: Message):
             f"Por favor, usa el comando `/drive_login` nuevamente para obtener el enlace de autenticación con Google."
         )
         await client.send_message(target_user_id, user_msg)
-        #await message.reply_text("✅ Usuario notificado con éxito.") # Opcional: confirmar al admin
+        logger.info(f"Mensaje de notificación enviado al usuario {target_user_id}.")
+        # Opcional: Enviar un mensaje al admin confirmando que se envió el mensaje al usuario
+        # await message.reply_text("✅ Mensaje de notificación enviado al usuario.")
     except Exception as e:
-        logger.error(f"Error al notificar al usuario {target_user_id} de aprobación: {e}")
-        await message.reply_text(f"⚠️ El usuario fue aprobado, pero no se pudo enviarle el mensaje de confirmación: {e}")
+        error_msg = f"⚠️ El usuario {target_user_id} fue aprobado, pero no se pudo enviarle el mensaje de confirmación: {e}"
+        logger.error(error_msg, exc_info=True)
+        await message.reply_text(error_msg)
 
 
 # --- Rutas Web para Autenticación OAuth ---
@@ -798,7 +821,7 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_data: # <-- Corrección aquí
+    if not creds_ # <-- Corrección aquí
         # No se puede enviar mensaje a Telegram desde aquí fácilmente sin más setup
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado en el servidor.", 500
 
