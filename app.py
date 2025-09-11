@@ -5,12 +5,8 @@ import logging
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-# Importar errores de la API de Telegram (forma compatible con v20.x)
-from telegram.error import (
-    TelegramError,
-    BadRequest,
-    Unauthorized
-)
+# Importar solo la clase base de errores de la API de Telegram
+from telegram.error import TelegramError
 
 # Cargar variables de entorno
 load_dotenv()
@@ -88,13 +84,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = video.file_id
         file_size_bytes = video.file_size
 
-        # Opcional: Borrar el mensaje reenviado para mantener el chat limpio
-        # try:
-        #     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=forwarded_message.message_id)
-        #     logger.info(f"Mensaje reenviado {forwarded_message.message_id} borrado.")
-        # except Exception as e:
-        #     logger.warning(f"No se pudo borrar el mensaje reenviado: {e}")
-
         # Obtener la ruta del archivo usando getFile
         file_info = await context.bot.get_file(file_id=file_id)
         file_path = file_info.file_path
@@ -112,24 +101,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
-    # --- Manejo de errores correcto para v20.x ---
-    except Unauthorized:
-        await update.message.reply_text(
-            "❌ El bot no tiene permiso para leer o reenviar mensajes de ese canal. "
-            "Asegúrate de que sigue siendo administrador."
-        )
-    except BadRequest as e:
+    # --- Manejo de errores GENERAL para v20.x ---
+    # Capturamos cualquier error de la API de Telegram
+    except TelegramError as e:
         error_msg = str(e).lower()
+        logger.error(f"Error de la API de Telegram al procesar {message_id}: {e}")
         if "message to forward not found" in error_msg or "message not found" in error_msg:
             await update.message.reply_text("❌ No se encontró un mensaje con ese ID en el canal.")
         elif "chat not found" in error_msg:
-             await update.message.reply_text("❌ No se pudo encontrar el canal. Verifica el enlace.")
+            await update.message.reply_text("❌ No se pudo encontrar el canal. Verifica el enlace o los permisos del bot.")
+        elif "not enough rights" in error_msg or "not admin" in error_msg or "permission_denied" in error_msg:
+             await update.message.reply_text(
+                "❌ El bot no tiene permiso suficiente para leer o reenviar mensajes de ese canal. "
+                "Asegúrate de que sigue siendo administrador con permisos de lectura."
+            )
+        elif "file is too big" in error_msg:
+             await update.message.reply_text(
+                "❌ El archivo del video es demasiado grande para ser reenviado por el bot. "
+                "Este método tiene un límite de 20MB. Para videos más grandes, se requiere `Telethon`."
+            )
         else:
-            await update.message.reply_text(f"❌ Solicitud incorrecta de la API de Telegram: {e}")
-    except TelegramError as e: # Captura general para otros errores de la API
-         await update.message.reply_text(f"❌ Error de la API de Telegram: {e}")
-    except Exception as e: # Captura cualquier otro error inesperado
-        logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
+            # Error genérico de la API
+            await update.message.reply_text(f"❌ Error de la API de Telegram: {e}")
+    except Exception as e: # Captura cualquier otro error inesperado (problemas de red, etc.)
+        logger.error(f"Error inesperado al procesar el enlace: {e}", exc_info=True)
         await update.message.reply_text(
             f"❌ Error inesperado al obtener el enlace.\n"
             f"Detalles: {e}\n\n"
@@ -158,7 +153,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Iniciar el bot
-    logger.info("Iniciando el bot (v20.7 - forward_message)...")
+    logger.info("Iniciando el bot (v20.7 - forward_message - manejo de errores simplificado)...")
     application.run_polling()
 
 if __name__ == '__main__':
