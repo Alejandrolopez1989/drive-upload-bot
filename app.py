@@ -1,14 +1,10 @@
 import os
-import re
 import logging
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
-from telegram import Bot
-from telethon import TelegramClient
-from telethon.errors import MessageIdInvalidError, ChatAdminRequiredError, ChannelPrivateError
-from telegram.error import TelegramError
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Cargar variables de entorno desde .env (útil para local)
+# Cargar variables de entorno
 load_dotenv()
 
 # --- Configuración de Logs ---
@@ -19,123 +15,105 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Configuración de Variables de Entorno ---
-API_ID = int(os.getenv('TELEGRAM_API_ID'))
-API_HASH = os.getenv('TELEGRAM_API_HASH')
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-if not all([API_ID, API_HASH, BOT_TOKEN]):
-    raise ValueError("Por favor, establece TELEGRAM_API_ID, TELEGRAM_API_HASH y TELEGRAM_BOT_TOKEN en las variables de entorno.")
+if not TOKEN:
+    raise ValueError("Por favor, establece la variable de entorno TELEGRAM_BOT_TOKEN")
 
-# --- Inicialización de Clientes ---
-# Bot API (para getFile)
-bot = Bot(token=BOT_TOKEN)
+# --- Funciones del Bot ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Envía un mensaje cuando el comando /start es emitido."""
+    user = update.effective_user
+    await update.message.reply_text(
+        f"Hola {user.first_name}!\n\n"
+        "Usa el comando:\n"
+        "/getlink @nombre_canal <message_id>\n\n"
+        "Ejemplo: /getlink @micanal 123\n"
+        "Te daré el enlace de streaming del video en ese mensaje."
+    )
 
-# Telethon Client (para acceder a mensajes)
-# La sesión se guardará en 'telethon_session/session_name.session'
-client = TelegramClient('telethon_session/bot_session', API_ID, API_HASH)
+async def get_streaming_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Obtiene el enlace de streaming de un video en un canal."""
+    user_id = update.effective_user.id
+    # Opcional: Restringir el uso a tu user_id
+    # TU_USER_ID = int(os.getenv('TU_USER_ID', 0)) # Añade TU_USER_ID a .env
+    # if TU_USER_ID and user_id != TU_USER_ID:
+    #     await update.message.reply_text("❌ No tienes permiso para usar este comando.")
+    #     return
 
-app = FastAPI(title="Telegram Video Linker")
+    if not context.args or len(context.args) != 2:
+        await update.message.reply_text(
+            "❌ Uso incorrecto.\n"
+            "Usa: /getlink @nombre_canal <message_id>\n"
+            "Ejemplo: /getlink @micanal 123"
+        )
+        return
 
-# --- Funciones auxiliares ---
-async def parse_tg_link(link: str):
-    """Extrae chat_id y message_id de un enlace de Telegram público o privado."""
-    # Enlaces tipo: https://t.me/c/123456789/1122 o https://t.me/username/1122
-    # Para canales/grupos privados (t.me/c/...), el chat_id es -100 + los números
-    private_match = re.match(r"https?://t\.me/c/(\d+)/(\d+)", link)
-    if private_match:
-        raw_chat_id = private_match.group(1)
-        message_id = int(private_match.group(2))
-        # Para canales/grupos privados, el ID real es -100 seguido del ID corto
-        chat_id = int(f"-100{raw_chat_id}")
-        return chat_id, message_id
-
-    public_match = re.match(r"https?://t\.me/([a-zA-Z0-9_]+)/(\d+)", link)
-    if public_match:
-        username = public_match.group(1)
-        message_id = int(public_match.group(2))
-        # Para enlaces públicos, el chat_id es el username con @
-        chat_id = f"@{username}"
-        return chat_id, message_id
-
-    raise ValueError("Formato de enlace no válido. Usa https://t.me/c/... o https://t.me/username/...")
-
-async def get_streaming_url(file_id: str) -> str:
-    """Obtiene el enlace de streaming usando el API de Bot."""
+    channel_username = context.args[0]
     try:
-        file_info = await bot.get_file(file_id=file_id)
+        message_id = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ El <message_id> debe ser un número.")
+        return
+
+    try:
+        # 1. Obtener el chat_id del canal (verifica que el bot esté en el canal o tenga acceso)
+        chat = await context.bot.get_chat(channel_username)
+        chat_id = chat.id
+        logger.info(f"Accediendo al canal: {channel_username} (ID: {chat_id})")
+
+        # 2. Obtener el mensaje del canal
+        message = await context.bot.get_message(chat_id=chat_id, message_id=message_id)
+        logger.info(f"Mensaje obtenido: {message_id}")
+
+        # 3. Verificar si el mensaje tiene video
+        if not message.video:
+            await update.message.reply_text("❌ El mensaje no contiene un video.")
+            return
+
+        video = message.video
+        file_id = video.file_id
+        file_size_bytes = video.file_size
+
+        # 4. Obtener la ruta del archivo usando getFile
+        file_info = await context.bot.get_file(file_id=file_id)
         file_path = file_info.file_path
-        return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-    except TelegramError as e:
-        logger.error(f"Error al obtener el archivo del bot: {e}")
-        raise HTTPException(status_code=500, detail=f"Error del API de Bot: {e}")
 
-# --- Rutas de la API ---
-@app.get("/")
-async def read_root():
-    return {"message": "¡Hola! Envíame un enlace de Telegram para obtener el enlace de streaming."}
+        # 5. Construir el enlace de streaming
+        streaming_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
 
-@app.get("/get_streaming_link")
-async def get_link(tg_link: str):
-    """
-    Obtiene el enlace de streaming para un video en Telegram.
-    Parámetro: tg_link (URL del mensaje de Telegram)
-    """
-    try:
-        chat_id, message_id = await parse_tg_link(tg_link)
-        logger.info(f"Procesando enlace: Chat ID: {chat_id}, Message ID: {message_id}")
-
-        # Asegurarse de que el cliente Telethon esté conectado
-        if not client.is_connected():
-            await client.connect()
-
-        # Obtener el mensaje
-        message = await client.get_messages(chat_id, ids=message_id)
-        
-        if not message:
-             raise HTTPException(status_code=404, detail="Mensaje no encontrado.")
-        
-        if not message.media:
-             raise HTTPException(status_code=400, detail="El mensaje no contiene un archivo multimedia.")
-
-        # Obtener el file_id del video
-        file_id = None
-        if hasattr(message.media, 'document') and message.media.document.mime_type.startswith('video'):
-            file_id = message.media.document.id
-        elif hasattr(message, 'video') and message.video:
-             file_id = message.video.id
-        else:
-             raise HTTPException(status_code=400, detail="El mensaje no contiene un video válido.")
-
-        # Convertir file_id a string si es necesario
-        file_id_str = str(file_id) 
-
-        # Obtener el enlace de streaming usando el API de Bot
-        streaming_url = await get_streaming_url(file_id_str)
-
-        file_size_bytes = 0
-        if hasattr(message.media, 'document'):
-            file_size_bytes = message.media.document.size
-        elif hasattr(message, 'video'):
-             file_size_bytes = message.video.size
-
+        # 6. Enviar el enlace al usuario
         file_size_mb = file_size_bytes / (1024 * 1024)
+        await update.message.reply_text(
+            f"✅ *¡Enlace de streaming obtenido!*\n\n"
+            f"🔗 [Ver Video]({streaming_url})\n\n"
+            f"📁 Tamaño: {file_size_mb:.2f} MB\n"
+            f"🆔 File ID: `{file_id}`",
+            parse_mode='Markdown'
+        )
 
-        return {
-            "success": True,
-            "tg_link": tg_link,
-            "streaming_url": streaming_url,
-            "file_size_mb": round(file_size_mb, 2)
-        }
-
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except (MessageIdInvalidError, ChatAdminRequiredError, ChannelPrivateError) as e:
-        logger.error(f"Error de Telethon al acceder al mensaje: {e}")
-        raise HTTPException(status_code=403, detail=f"Acceso denegado o mensaje inválido: {e}")
     except Exception as e:
-        logger.error(f"Error inesperado: {e}")
-        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {e}")
+        logger.error(f"Error al procesar el enlace: {e}")
+        await update.message.reply_text(
+            f"❌ Error al obtener el enlace.\n"
+            f"Asegúrate de:\n"
+            f"1. El bot es administrador del canal.\n"
+            f"2. El message_id es correcto.\n"
+            f"3. El mensaje contiene un video.\n\n"
+            f"Error: {e}"
+        )
 
-# --- Punto de entrada para Render ---
-# Render requiere que el objeto de la app se llame `app`
-# y que se ejecute con `uvicorn app:app ...`s
+def main():
+    """Inicia el bot."""
+    application = Application.builder().token(TOKEN).build()
+
+    # Comandos
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("getlink", get_streaming_link))
+
+    # Iniciar el bot
+    logger.info("Iniciando el bot...")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
