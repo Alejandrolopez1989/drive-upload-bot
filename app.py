@@ -31,12 +31,7 @@ try:
 except ValueError:
     raise ValueError("CANAL_ID debe ser un número entero (incluyendo el -100).")
 
-# ID del chat del propio bot (para reenviar el mensaje a sí mismo)
-# El bot puede enviarse mensajes a sí mismo usando su propio ID o un chat privado con un usuario específico.
-# Para simplificar, podemos reenviar el mensaje a un chat privado contigo.
-# Opcional: Puedes definir tu USER_ID para mayor seguridad
-# TU_USER_ID = int(os.getenv('TU_USER_ID', 0)) # Descomenta y configura en Render si quieres
-
+# --- Funciones del Bot ---
 def start(update: Update, context: CallbackContext):
     """Envía un mensaje cuando el comando /start es emitido."""
     user = update.effective_user
@@ -65,14 +60,12 @@ def get_streaming_link(update: Update, context: CallbackContext):
         update.message.reply_text("❌ El <message_id> debe ser un número.")
         return
 
+    forwarded_message = None # Para poder borrarlo en el finally
+
     try:
-        # --- CORRECCIÓN: Usar forward_message para obtener el mensaje ---
-        # El bot reenvía el mensaje del canal a un chat (en este caso, al chat actual del usuario)
-        # Al reenviarlo, el bot recibe el objeto del mensaje completo.
-        
-        # Reenviar el mensaje del canal al chat del usuario que envió el comando
+        # --- Reenviar el mensaje del canal al chat del usuario ---
         forwarded_message = context.bot.forward_message(
-            chat_id=update.effective_chat.id,  # Reenviar al chat actual (el usuario)
+            chat_id=update.effective_chat.id,
             from_chat_id=CANAL_ID,
             message_id=message_id
         )
@@ -81,16 +74,11 @@ def get_streaming_link(update: Update, context: CallbackContext):
         # Verificar si el mensaje reenviado tiene video
         if not forwarded_message or not forwarded_message.video:
             update.message.reply_text("❌ El mensaje reenviado no contiene un video.")
-            # Opcional: Borrar el mensaje reenviado si no se necesita
-            # context.bot.delete_message(chat_id=update.effective_chat.id, message_id=forwarded_message.message_id)
             return
 
         video = forwarded_message.video
         file_id = video.file_id
         file_size_bytes = video.file_size
-
-        # Opcional: Borrar el mensaje reenviado si no se necesita
-        # context.bot.delete_message(chat_id=update.effective_chat.id, message_id=forwarded_message.message_id)
 
         # Obtener la ruta del archivo usando getFile
         file_info = context.bot.get_file(file_id=file_id)
@@ -129,6 +117,18 @@ def get_streaming_link(update: Update, context: CallbackContext):
             f"Detalles: {e}\n\n"
             f"Por favor, inténtalo más tarde o revisa la configuración."
         )
+    finally:
+        # --- Intentar borrar el mensaje reenviado para mantener el chat limpio ---
+        if forwarded_message:
+            try:
+                context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=forwarded_message.message_id
+                )
+                logger.info(f"Mensaje reenviado {forwarded_message.message_id} borrado.")
+            except Exception as e:
+                logger.warning(f"No se pudo borrar el mensaje reenviado: {e}")
+
 
 def main():
     """Inicia el bot."""
