@@ -1,11 +1,10 @@
 services:
   - type: web
-    name: telegram-streaming-link-bot
+    name: telegram-video-streaming-linker
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     envVars:
       - key: 8246937087:AAFhqfSWsL8qKUI1zZsnGH02mc0Ji3aywe8
         sync: false
-      # - key: TU_USER_ID # (Opcional, para mayor seguridad)
-      #   sync: false
+    runtime: python@3.11
