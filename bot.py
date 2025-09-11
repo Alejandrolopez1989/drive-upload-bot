@@ -1,156 +1,651 @@
-# app.py
 import os
-import re
+import pickle
+import asyncio
 import logging
-from dotenv import load_dotenv
+import base64
+import json
+import time
+import mimetypes
+import aiofiles
+import secrets # Para generar 'state' seguro
+from quart import Quart, request, redirect, url_for
+from pyrogram import Client, filters, enums
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, CallbackQuery
+from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+import io
 
-# Cargar variables de entorno
-load_dotenv()
+# --- CONFIGURACIÓN DESDE VARIABLES DE ENTORNO ---
+API_ID = int(os.environ.get("TELEGRAM_API_ID"))
+API_HASH = os.environ.get("TELEGRAM_API_HASH")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# --- Configuración de Logs ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# --- CONFIGURACIÓN DE GOOGLE DRIVE ---
+SCOPES = ['https://www.googleapis.com/auth/drive']
+# TOKEN_FILE ya no se usa como archivo único
+
+# --- FORZAR LA URI DE REDIRECCIÓN ---
+RENDER_REDIRECT_URI = "https://google-drive-vip.onrender.com/oauth2callback" # <-- Reemplaza con tu URL real de Render
+
+# --- Inicialización ---
+app_quart = Quart(__name__)
+app_telegram = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Diccionario para almacenar operaciones en curso y poder cancelarlas
+active_operations = {}
+
+# Diccionario para almacenar credenciales de Google Drive por user_id
+# NOTA: Esto se reinicia al apagar el bot. Para persistencia, usar base de datos.
+user_credentials = {}
+
+# Diccionario para asociar 'state' de OAuth con user_id temporalmente
+login_states = {}
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Configuración de Variables de Entorno ---
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# --- Función para verificar si un usuario está autenticado ---
+def is_user_authenticated(user_id):
+    """Verifica si un usuario tiene credenciales válidas."""
+    creds = user_credentials.get(user_id)
+    if not creds:
+        return False
+    if creds.valid:
+        return True
+    if creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            user_credentials[user_id] = creds # Actualizar credenciales refrescadas
+            return True
+        except Exception as e:
+            logger.error(f"Error al refrescar credenciales para el usuario {user_id}: {e}")
+            user_credentials.pop(user_id, None) # Eliminar credenciales inválidas
+            return False
+    return False
 
-if not TOKEN:
-    raise ValueError("Por favor, establece la variable de entorno TELEGRAM_BOT_TOKEN")
+# --- Función para obtener el servicio de Drive del usuario ---
+def get_user_drive_service(user_id):
+    """Obtiene el servicio autenticado de Google Drive para un usuario específico."""
+    creds = user_credentials.get(user_id)
+    if not creds:
+        logger.info(f"No se encontraron credenciales para el usuario {user_id}")
+        return None
 
-# --- Funciones auxiliares ---
-def parse_private_link(link: str):
-    """Extrae raw_chat_id y message_id de un enlace privado de Telegram."""
-    # Enlace tipo: https://t.me/c/123456789/1122
-    match = re.match(r"https?://t\.me/c/(\d+)/(\d+)", link)
-    if match:
-        raw_chat_id = match.group(1) # 123456789
-        message_id = int(match.group(2)) # 1122
-        # Para canales/grupos privados, el ID real es -100 seguido del ID corto
-        chat_id = int(f"-100{raw_chat_id}") # -100123456789
-        return chat_id, message_id, raw_chat_id
-    return None, None, None
+    if creds and creds.valid:
+        logger.info(f"Credenciales válidas encontradas para el usuario {user_id}")
+        return build('drive', 'v3', credentials=creds)
+    elif creds.expired and creds.refresh_token:
+        try:
+            logger.info(f"Intentando refrescar credenciales para el usuario {user_id}")
+            creds.refresh(Request())
+            user_credentials[user_id] = creds # Actualizar credenciales refrescadas
+            logger.info(f"Credenciales refrescadas y actualizadas para el usuario {user_id}")
+            return build('drive', 'v3', credentials=creds)
+        except Exception as e:
+            logger.error(f"Error al refrescar el token para el usuario {user_id}: {e}")
+            user_credentials.pop(user_id, None) # Eliminar credenciales inválidas
+            return None
+    else:
+        logger.error(f"Credenciales cargadas para el usuario {user_id} pero no válidas.")
+        user_credentials.pop(user_id, None) # Limpiar credenciales inválidas
+        return None
 
-# --- Funciones del Bot (ahora async) ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envía un mensaje cuando el comando /start es emitido."""
-    user = update.effective_user
-    await update.message.reply_text(
-        f"Hola {user.first_name}!\n\n"
-        "Envíame el enlace de un mensaje de video en tu canal.\n"
-        "Ejemplo: `https://t.me/c/123456789/1122`\n"
-        "Te devolveré el enlace de streaming de ese video.",
-        parse_mode='Markdown'
+# --- Clase mejorada para manejar la subida con progreso y cancelación ---
+class ProgressMediaUpload(MediaIoBaseUpload):
+    def __init__(self, filename, mimetype=None, chunksize=1024 * 1024, resumable=False, callback=None, cancel_flag=None):
+        self._filename = filename
+        self._file_handle = open(filename, 'rb')
+        self._total_size = os.path.getsize(filename)
+        self._callback = callback
+        self._cancel_flag = cancel_flag
+        self._uploaded = 0
+        super().__init__(self._file_handle, mimetype or 'application/octet-stream', chunksize=chunksize, resumable=resumable)
+
+    def next_chunk(self, http=None, num_retries=0):
+        if self._cancel_flag and self._cancel_flag.is_set():
+            self._file_handle.close()
+            raise Exception("Operación cancelada por el usuario.")
+
+        pre_pos = self._file_handle.tell()
+        status, response = super().next_chunk(http=http, num_retries=num_retries)
+        post_pos = self._file_handle.tell()
+        chunk_uploaded = post_pos - pre_pos
+        self._uploaded += chunk_uploaded
+
+        if self._callback and self._total_size > 0:
+            progress = min(100, int((self._uploaded / self._total_size) * 100))
+            try:
+                self._callback(progress)
+            except Exception as e:
+                logger.warning(f"Error en callback de progreso de subida: {e}")
+
+        if self._cancel_flag and self._cancel_flag.is_set():
+            self._file_handle.close()
+            raise Exception("Operación cancelada por el usuario.")
+
+        if response is not None:
+            self._file_handle.close()
+
+        return status, response
+
+    def __del__(self):
+        if hasattr(self, '_file_handle') and not self._file_handle.closed:
+            self._file_handle.close()
+
+# --- Función para subir con progreso y cancelación ---
+async def upload_to_drive_with_progress(user_id, file_path, file_name, progress_callback, cancel_flag):
+    """Sube un archivo a Google Drive del usuario y devuelve el ID del archivo."""
+    service = get_user_drive_service(user_id) # <-- Usar servicio del usuario
+    if not service:
+        logger.error(f"Servicio de Drive no disponible para el usuario {user_id} al intentar subir.")
+        return None
+    try:
+        file_metadata = {'name': file_name}
+        mime_type, _ = mimetypes.guess_type(file_path)
+        if mime_type is None:
+            mime_type = 'application/octet-stream'
+
+        media = ProgressMediaUpload(
+            filename=file_path,
+            mimetype=mime_type,
+            chunksize=1024 * 1024,
+            resumable=True,
+            callback=progress_callback,
+            cancel_flag=cancel_flag
+        )
+
+        request = service.files().create(body=file_metadata, media_body=media, fields='id')
+
+        response = None
+        while response is None:
+            if cancel_flag.is_set():
+                raise Exception("Operación cancelada por el usuario.")
+            status, response = request.next_chunk()
+
+        return response.get('id')
+    except Exception as e:
+        if "Operación cancelada por el usuario" in str(e):
+            logger.info(f"Subida cancelada por el usuario {user_id}.")
+            raise e
+        else:
+            logger.error(f"Error al subir a Drive para el usuario {user_id}: {e}")
+            raise e
+
+def get_file_url(file_id):
+    """Devuelve el enlace de descarga del archivo."""
+    return f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+
+# --- Función mejorada para listar videos con nombre para mostrar ---
+def list_drive_videos(user_id): # <-- Pasar user_id
+    """Lista solo los archivos de video en Google Drive del usuario."""
+    service = get_user_drive_service(user_id) # <-- Usar servicio del usuario
+    if not service:
+        logger.error(f"Servicio de Drive no disponible para el usuario {user_id} al intentar listar.")
+        return []
+    try:
+        # Consulta más específica para videos subidos por el bot
+        query = "name contains 'video_' and (mimeType contains 'video/' or name contains '.mp4' or name contains '.avi' or name contains '.mov' or name contains '.wmv' or name contains '.flv' or name contains '.webm')"
+        results = service.files().list(
+            pageSize=100,
+            fields="nextPageToken, files(id, name, mimeType, size, createdTime)",
+            q=query,
+            orderBy="createdTime desc"
+        ).execute()
+        items = results.get('files', [])
+
+        processed_items = []
+        for item in items:
+            drive_name = item.get('name', 'Sin_nombre')
+            if drive_name.startswith("video_") and '_' in drive_name:
+                parts = drive_name.split('_', 2)
+                if len(parts) == 3:
+                    display_name = parts[2]
+                else:
+                    display_name = drive_name
+            else:
+                 display_name = drive_name
+
+            item['display_name'] = display_name
+            processed_items.append(item)
+
+        return processed_items
+    except Exception as e:
+        logger.error(f"Error al listar videos de Drive para el usuario {user_id}: {e}")
+        return []
+
+# --- Función para eliminar de Drive ---
+def delete_from_drive(file_id, user_id): # <-- Pasar user_id
+    """Elimina un archivo de Google Drive del usuario."""
+    service = get_user_drive_service(user_id) # <-- Usar servicio del usuario
+    if not service:
+        logger.error(f"Servicio de Drive no disponible para el usuario {user_id} al intentar eliminar.")
+        return False
+    try:
+        service.files().delete(fileId=file_id).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error al eliminar de Drive para el usuario {user_id}: {e}")
+        return False
+
+# --- Manejadores de Pyrogram (Telegram) ---
+@app_telegram.on_message(filters.command("start"))
+async def start_command(client: Client, message: Message):
+    welcome_text = (
+        "¡Hola! 👋\n\n"
+        "Antes de usar el bot, necesitas conectar tu cuenta de Google Drive.\n"
+        "Usa el comando /drive_login para autenticarte.\n\n"
+        "Después de autenticarte, envíame un video para subirlo a tu Google Drive.\n\n"
+        "Usa los comandos del menú para interactuar conmigo.\n"
     )
+    await message.reply_text(welcome_text)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los mensajes de texto (enlaces) enviados por el usuario."""
-    user_message = update.message.text
+async def set_bot_commands(client: Client):
+    """Establece los comandos del bot en el menú de Telegram."""
+    commands = [
+        BotCommand("start", "Mostrar mensaje de inicio"),
+        BotCommand("drive_login", "Conectar tu cuenta de Google Drive"),
+        BotCommand("ver_nube", "Ver tus videos en la nube"),
+    ]
+    try:
+        await client.set_bot_commands(commands)
+        logger.info("✅ Menú de comandos establecido correctamente.")
+    except Exception as e:
+        logger.error(f"Error al establecer el menú de comandos: {e}")
 
-    if not user_message.startswith("http"):
-        await update.message.reply_text("Por favor, envíame un enlace de Telegram válido.")
+@app_telegram.on_message(filters.command("drive_login"))
+async def drive_login_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    if is_user_authenticated(user_id):
+        await message.reply_text("✅ Tu cuenta de Google Drive ya está conectada.")
         return
 
-    chat_id, message_id, raw_chat_id = parse_private_link(user_message)
+    # Generar un 'state' único para esta solicitud
+    state = secrets.token_urlsafe(32)
+    login_states[state] = user_id # Asociar state con user_id
 
-    if not chat_id or not message_id:
-        await update.message.reply_text("❌ Enlace no válido. Usa el formato `https://t.me/c/...`", parse_mode='Markdown')
+    creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    if not creds_
+        await message.reply_text("❌ Error del servidor: Credenciales de Google no configuradas.")
         return
-
-    forwarded_message = None # Para poder borrarlo después
 
     try:
-        # --- Reenviar el mensaje del canal al chat del usuario ---
-        # El bot debe ser administrador del canal para hacer esto.
-        forwarded_message = await context.bot.forward_message(
-            chat_id=update.effective_chat.id, # Reenviar al chat actual (el usuario)
-            from_chat_id=chat_id,
-            message_id=message_id
-        )
-        logger.info(f"Mensaje {message_id} reenviado del canal {raw_chat_id}.")
+        async with aiofiles.open('credentials_temp.json', 'w') as f:
+            await f.write(creds_data)
 
-        # Verificar si el mensaje reenviado tiene video
-        if not forwarded_message or not hasattr(forwarded_message, 'video') or not forwarded_message.video:
-            await update.message.reply_text("❌ El mensaje reenviado no contiene un video.")
+        flow = Flow.from_client_secrets_file(
+            'credentials_temp.json', scopes=SCOPES,
+            redirect_uri=RENDER_REDIRECT_URI)
+        # Pasar el 'state' generado
+        authorization_url, _ = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            state=state)
+
+        login_url = authorization_url
+        await message.reply_text(
+            "Por favor, haz clic en el siguiente enlace para conectar tu cuenta de Google Drive:\n"
+            f"{login_url}"
+        )
+    except Exception as e:
+        logger.error(f"Error al iniciar login para el usuario {user_id}: {e}")
+        await message.reply_text("❌ Ocurrió un error al iniciar el proceso de login. Inténtalo de nuevo más tarde.")
+    finally:
+        if os.path.exists('credentials_temp.json'):
+            os.remove('credentials_temp.json')
+
+
+@app_telegram.on_message(filters.command("ver_nube"))
+async def ver_nube_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    # Verificar autenticación
+    if not is_user_authenticated(user_id):
+        await message.reply_text(
+            "❌ Necesitas conectar tu cuenta de Google Drive primero.\n"
+            "Usa el comando /drive_login para autenticarte."
+        )
+        return
+
+    service = get_user_drive_service(user_id) # <-- Usar servicio del usuario
+    if not service:
+        await message.reply_text(
+            "❌ El bot está teniendo un problema de conexión con tu cuenta de Google Drive.\n"
+            "Intenta desconectarte y volver a conectarte usando /drive_login."
+        )
+        return
+
+    status_message = await message.reply_text("🔍 Buscando tus videos en Google Drive...")
+    videos = list_drive_videos(user_id) # <-- Pasar user_id
+
+    if not videos:
+        await status_message.edit_text("No se encontraron videos en tu nube.")
+        return
+
+    response_text = f"*{len(videos)} videos en tu nube:*\n"
+    for video in videos:
+        file_name_to_display = video.get('display_name', 'Sin_nombre')
+        file_id = video.get('id')
+        display_name_limited = (file_name_to_display[:45] + '...') if len(file_name_to_display) > 48 else file_name_to_display
+        file_url = get_file_url(file_id)
+        delete_command = f"`/delete_{file_id}`"
+        response_text += f"\n🎬 [{display_name_limited}]({file_url})\n🗑️ {delete_command}\n"
+
+    if len(response_text) > 4096:
+        parts = [response_text[i:i+4096] for i in range(0, len(response_text), 4096)]
+        await status_message.edit_text(parts[0], parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        for part in parts[1:]:
+             await message.reply_text(part, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
+    else:
+        await status_message.edit_text(response_text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+@app_telegram.on_message(filters.video & filters.private)
+async def handle_video(client: Client, message: Message):
+    user_id = message.from_user.id
+
+    # Verificar autenticación
+    if not is_user_authenticated(user_id):
+        await message.reply_text(
+            "❌ Necesitas conectar tu cuenta de Google Drive primero.\n"
+            "Usa el comando /drive_login para autenticarte."
+        )
+        return
+
+    if user_id in active_operations:
+        await message.reply_text("⚠️ Ya tienes una operación en curso. Espera a que termine o cancélala.")
+        return
+
+    service = get_user_drive_service(user_id) # <-- Usar servicio del usuario
+    if not service:
+        await message.reply_text(
+            "❌ El bot está teniendo un problema de conexión con tu cuenta de Google Drive.\n"
+            "Intenta desconectarte y volver a conectarte usando /drive_login."
+        )
+        return
+
+    try:
+        cancel_flag = asyncio.Event()
+        cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{user_id}")]]
+        reply_markup = InlineKeyboardMarkup(cancel_button)
+
+        status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
+        status_message_id = status_message.id
+
+        active_operations[user_id] = {
+            'task': asyncio.current_task(),
+            'file_path': None,
+            'status_message_id': status_message_id,
+            'cancel_flag': cancel_flag
+        }
+
+        # --- Descarga con progreso ---
+        last_update = time.time()
+        main_loop = asyncio.get_running_loop()
+        last_shown_progress = 0
+
+        def progress_callback(current, total):
+            nonlocal last_update, last_shown_progress
+            current_time = time.time()
+            if cancel_flag.is_set():
+                raise Exception("Operación cancelada por el usuario.")
+            if current_time - last_update > 2 or current == total:
+                if total > 0:
+                    progress = int((current / total) * 100)
+                    if progress >= 100:
+                        current_milestone = 100
+                    elif progress >= 75:
+                        current_milestone = 75
+                    elif progress >= 50:
+                        current_milestone = 50
+                    elif progress >= 25:
+                        current_milestone = 25
+                    else:
+                        current_milestone = 0
+
+                    if current_milestone > last_shown_progress:
+                        main_loop.call_soon_threadsafe(
+                            asyncio.create_task,
+                            update_status_message(client, message.chat.id, status_message_id, f"📥 Descargando el video... {current_milestone}%", user_id)
+                        )
+                        last_shown_progress = current_milestone
+
+                last_update = current_time
+
+        file_path = await client.download_media(message, progress=progress_callback)
+
+        if cancel_flag.is_set():
+            await update_status_message(client, message.chat.id, status_message_id, "❌ Operación cancelada durante la descarga.", user_id, remove_buttons=True)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            active_operations.pop(user_id, None)
             return
 
-        video = forwarded_message.video
-        file_id = video.file_id
-        file_size_bytes = video.file_size
+        await update_status_message(client, message.chat.id, status_message_id, "📥 Descargando el video... 100%", user_id)
+        await asyncio.sleep(0.5)
 
-        # Obtener la ruta del archivo usando getFile
-        file_info = await context.bot.get_file(file_id=file_id)
-        file_path = file_info.file_path
+        active_operations[user_id]['file_path'] = file_path
+        await update_status_message(client, message.chat.id, status_message_id, "☁️ Subiendo a tu Google Drive... 0%", user_id)
 
-        # Construir el enlace de streaming
-        streaming_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+        # --- Subida con progreso ---
+        last_shown_progress_upload = 0
+        main_loop_upload = asyncio.get_running_loop()
 
-        # Enviar el enlace al usuario
-        file_size_mb = file_size_bytes / (1024 * 1024)
-        await update.message.reply_text(
-            f"✅ *¡Enlace de streaming obtenido!*\n\n"
-            f"🔗 [Ver Video]({streaming_url})\n\n"
-            f"📁 Tamaño: {file_size_mb:.2f} MB\n"
-            f"🆔 File ID: `{file_id}`",
-            parse_mode='Markdown'
-        )
+        def update_upload_progress(progress):
+            nonlocal last_shown_progress_upload
+            if cancel_flag.is_set():
+                raise Exception("Operación cancelada por el usuario.")
 
-    # --- Manejo de errores GENERAL para v20.x ---
-    # Capturamos cualquier error de la API de Telegram
-    except TelegramError as e:
-        error_msg = str(e).lower()
-        logger.error(f"Error de la API de Telegram al procesar {message_id}: {e}")
-        if "message to forward not found" in error_msg or "message not found" in error_msg:
-            await update.message.reply_text("❌ No se encontró un mensaje con ese ID en el canal.")
-        elif "chat not found" in error_msg:
-            await update.message.reply_text("❌ No se pudo encontrar el canal. Verifica el enlace o los permisos del bot.")
-        elif "not enough rights" in error_msg or "not admin" in error_msg or "permission_denied" in error_msg:
-             await update.message.reply_text(
-                "❌ El bot no tiene permiso suficiente para leer o reenviar mensajes de ese canal. "
-                "Asegúrate de que sigue siendo administrador con permisos de lectura."
-            )
-        elif "file is too big" in error_msg:
-             await update.message.reply_text(
-                "❌ El archivo del video es demasiado grande para ser reenviado por el bot. "
-                "Este método tiene un límite de 20MB. Para videos más grandes, se requiere `Telethon`."
+            if progress >= 100:
+                current_milestone = 100
+            elif progress >= 75:
+                current_milestone = 75
+            elif progress >= 50:
+                current_milestone = 50
+            elif progress >= 25:
+                current_milestone = 25
+            else:
+                current_milestone = 0
+
+            if current_milestone > last_shown_progress_upload:
+                main_loop_upload.call_soon_threadsafe(
+                    asyncio.create_task,
+                    update_status_message(client, message.chat.id, status_message_id, f"☁️ Subiendo a tu Google Drive... {current_milestone}%", user_id)
+                )
+                last_shown_progress_upload = current_milestone
+
+        file_name = f"video_{message.video.file_unique_id}_{message.video.file_name or 'video.mp4'}"
+        # Pasar user_id a la función de subida
+        file_id = await upload_to_drive_with_progress(user_id, file_path, file_name, update_upload_progress, cancel_flag)
+
+        if cancel_flag.is_set():
+            await update_status_message(client, message.chat.id, status_message_id, "❌ Operación cancelada durante la subida.", user_id, remove_buttons=True)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            active_operations.pop(user_id, None)
+            return
+
+        if file_id:
+            file_url = get_file_url(file_id)
+            await update_status_message(client, message.chat.id, status_message_id,
+                f"✅ ¡Video subido exitosamente a tu Google Drive!\n\n"
+                f"🔗 [Descargar Video]({file_url})\n\n"
+                f"Usa /ver_nube para ver y gestionar tus videos.",
+                user_id, remove_buttons=True
             )
         else:
-            # Error genérico de la API
-            await update.message.reply_text(f"❌ Error de la API de Telegram: {e}")
-    except Exception as e: # Captura cualquier otro error inesperado (problemas de red, etc.)
-        logger.error(f"Error inesperado al procesar el enlace: {e}", exc_info=True)
-        await update.message.reply_text(
-            f"❌ Error inesperado al obtener el enlace.\n"
-            f"Detalles: {e}\n\n"
-            f"Por favor, inténtalo más tarde."
-        )
-    finally:
-        # Intentar borrar el mensaje reenviado si se creó
-        if forwarded_message:
+            await update_status_message(client, message.chat.id, status_message_id, "❌ Error al subir el video a tu Google Drive.", user_id, remove_buttons=True)
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+    except Exception as e:
+        if "Operación cancelada por el usuario" in str(e):
+            pass
+        else:
+            logger.error(f"Error en handle_video para el usuario {user_id}: {e}")
+            status_message_id = active_operations.get(user_id, {}).get('status_message_id')
+            if status_message_id:
+                await update_status_message(client, message.chat.id, status_message_id, f"❌ Ocurrió un error: {str(e)}", user_id, remove_buttons=True)
             try:
-                await context.bot.delete_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=forwarded_message.message_id
-                )
-                logger.info(f"Mensaje reenviado {forwarded_message.message_id} borrado en el finally.")
-            except Exception as e:
-                logger.warning(f"(Finally) No se pudo borrar el mensaje reenviado: {e}")
+                if 'file_path' in locals() and os.path.exists(file_path):
+                    os.remove(file_path)
+            except:
+                pass
+    finally:
+        active_operations.pop(message.from_user.id, None)
+
+# --- Función auxiliar para actualizar mensajes de estado ---
+async def update_status_message(client: Client, chat_id: int, message_id: int, text: str, user_id: int, remove_buttons: bool = False):
+    """Actualiza un mensaje de estado, manejando errores de edición."""
+    try:
+        if remove_buttons:
+            await client.edit_message_text(chat_id, message_id, text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        else:
+            cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{user_id}")]]
+            reply_markup = InlineKeyboardMarkup(cancel_button)
+            await client.edit_message_text(chat_id, message_id, text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True, reply_markup=reply_markup)
+    except Exception as e:
+        if "MESSAGE_NOT_MODIFIED" in str(e):
+            logger.warning(f"No se pudo actualizar el mensaje de estado (no modificado): {e}")
+        else:
+            logger.error(f"No se pudo actualizar el mensaje de estado: {e}")
+
+# --- Manejador para Callback Queries (Botones Inline) ---
+@app_telegram.on_callback_query()
+async def on_callback_query(client: Client, callback_query: CallbackQuery):
+    data = callback_query.data
+    user_id = callback_query.from_user.id
+
+    if data.startswith("cancel_"):
+        target_user_id = int(data.split("_")[1])
+        if user_id != target_user_id:
+            await callback_query.answer("❌ No puedes cancelar la operación de otro usuario.", show_alert=True)
+            return
+
+        if user_id in active_operations:
+            operation = active_operations[user_id]
+            operation['cancel_flag'].set()
+            status_message_id = operation['status_message_id']
+            await update_status_message(client, callback_query.message.chat.id, status_message_id, "⏳ Cancelando operación...", user_id, remove_buttons=True)
+            await callback_query.answer("Operación cancelada.")
+        else:
+            await callback_query.answer("❌ No hay operación activa para cancelar.", show_alert=True)
+
+    else:
+        await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
+
+@app_telegram.on_message(filters.regex(r"^/delete_([a-zA-Z0-9_-]+)$"))
+async def delete_file(client: Client, message: Message):
+    user_id = message.from_user.id # Obtener user_id
+    # Verificar autenticación
+    if not is_user_authenticated(user_id):
+        await message.reply_text(
+            "❌ Necesitas conectar tu cuenta de Google Drive primero.\n"
+            "Usa el comando /drive_login para autenticarte."
+        )
+        return
+
+    service = get_user_drive_service(user_id) # <-- Usar servicio del usuario
+    if not service:
+        await message.reply_text(
+            "❌ El bot está teniendo un problema de conexión con tu cuenta de Google Drive.\n"
+            "Intenta desconectarte y volver a conectarte usando /drive_login."
+        )
+        return
+
+    match = message.matches[0] if message.matches else None
+    if not match:
+        await message.reply_text("❌ Comando no válido.")
+        return
+
+    file_id = match.group(1)
+
+    status_message = await message.reply_text("🗑️ Eliminando video de tu Google Drive...")
+    # Pasar user_id a la función de eliminación
+    if delete_from_drive(file_id, user_id):
+        await status_message.edit_text("✅ Video eliminado exitosamente de tu Google Drive.")
+    else:
+        await status_message.edit_text("❌ Error al eliminar el video de tu Google Drive o el video no existe.")
+
+# --- Rutas Web para Autenticación OAuth ---
+@app_quart.route('/')
+async def index():
+    return '<h1>Bot Listo</h1><p>El bot está en funcionamiento. Usa Telegram para interactuar.</p>'
+
+# La ruta /authorize ya no es necesaria como endpoint público,
+# ya que el enlace se genera dinámicamente en /drive_login
 
 
-def main():
-    """Inicia el bot."""
-    # Crear la aplicación del bot usando la nueva API
-    application = Application.builder().token(TOKEN).build()
+@app_quart.route('/oauth2callback')
+async def oauth2callback():
+    code = request.args.get('code')
+    state = request.args.get('state') # Obtener el state de la URL
+    if not code:
+        return 'Error: No se recibió el código de autorización.', 400
+    if not state or state not in login_states:
+         return 'Error: Estado de autenticación no válido o expirado.', 400
 
-    # Comandos y handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Obtener el user_id asociado con este state
+    user_id = login_states.pop(state, None) # Elimina el state después de usarlo
+    if not user_id:
+        return 'Error: No se pudo asociar el código con un usuario.', 400
 
-    # Iniciar el bot
-    logger.info("Iniciando el bot (v20.7 - forward_message - manejo de errores simplificado)...")
-    application.run_polling()
+    creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    if not creds_
+        # No se puede enviar mensaje a Telegram desde aquí fácilmente sin más setup
+        return "Error: GOOGLE_CREDENTIALS_JSON no está configurado en el servidor.", 500
 
-if __name__ == '__main__':
-    main()
+    try:
+        async with aiofiles.open('credentials_temp.json', 'w') as f:
+            await f.write(creds_data)
+
+        flow = Flow.from_client_secrets_file(
+            'credentials_temp.json', scopes=SCOPES,
+            redirect_uri=RENDER_REDIRECT_URI)
+
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+
+        # Almacenar las credenciales para este usuario específico
+        user_credentials[user_id] = creds
+
+        if os.path.exists('credentials_temp.json'):
+            os.remove('credentials_temp.json')
+
+        # Mensaje de éxito en la web
+        return f"""
+        <h1>¡Autenticación Exitosa!</h1>
+        <p>Tu cuenta de Google Drive ha sido conectada al bot.</p>
+        <p>ID de usuario asociado: {user_id}</p>
+        <p>Puedes cerrar esta ventana y usar el bot en Telegram.</p>
+        <script>
+            setTimeout(function() {{
+                window.close();
+            }}, 5000); // Cierra automáticamente después de 5 segundos
+        </script>
+        """
+
+    except Exception as e:
+        logger.error(f"Error en oauth2callback para el usuario {user_id}: {e}")
+        if os.path.exists('credentials_temp.json'):
+            os.remove('credentials_temp.json')
+        return f'Error durante la autenticación: {e}', 500
+
+# --- Punto de Entrada ---
+if __name__ == "__main__":
+    # No se necesita cargar token global
+    # success = load_token_from_env() # Eliminar esta línea
+    # if not success:
+    #     logger.warning("⚠️ El bot podría no estar autenticado. Falta GOOGLE_DRIVE_TOKEN_BASE64 o token.pickle.")
+
+    async def run_bot():
+        await app_telegram.start()
+        logger.info("Bot de Telegram iniciado.")
+        await set_bot_commands(app_telegram)
+
+    async def run_quart():
+        await app_quart.run_task(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_bot())
+    loop.run_until_complete(run_quart())
