@@ -5,8 +5,12 @@ import logging
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-# Importar las excepciones correctamente para v20.x
-import telegram.error
+# Importar errores de la API de Telegram (forma compatible con v20.x)
+from telegram.error import (
+    TelegramError,
+    BadRequest,
+    Unauthorized
+)
 
 # Cargar variables de entorno
 load_dotenv()
@@ -63,26 +67,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Enlace no válido. Usa el formato `https://t.me/c/...`", parse_mode='Markdown')
         return
 
-    try:
-        # --- USANDO LA API MODERNA v20.x CORRECTAMENTE ---
-        # En v20.x, el método directo para obtener un mensaje específico es:
-        # await context.bot.get_chat_message(chat_id=chat_id, message_id=message_id)
-        # Pero si ese no funciona, podemos intentar con get_message del objeto chat
-        # o simplemente usar forward_message/copy_message. Para solo leer metadatos,
-        # intentemos get_message del bot directamente.
-        
-        # El método correcto en v20.x es get_message (no get_chat_message)
-        message = await context.bot.get_message(chat_id=chat_id, message_id=message_id)
-        logger.info(f"Mensaje {message_id} obtenido del canal {raw_chat_id}.")
+    forwarded_message = None # Para poder borrarlo después
 
-        # Verificar si el mensaje tiene video
-        if not message or not hasattr(message, 'video') or not message.video:
-            await update.message.reply_text("❌ El mensaje no contiene un video.")
+    try:
+        # --- Reenviar el mensaje del canal al chat del usuario ---
+        # El bot debe ser administrador del canal para hacer esto.
+        forwarded_message = await context.bot.forward_message(
+            chat_id=update.effective_chat.id, # Reenviar al chat actual (el usuario)
+            from_chat_id=chat_id,
+            message_id=message_id
+        )
+        logger.info(f"Mensaje {message_id} reenviado del canal {raw_chat_id}.")
+
+        # Verificar si el mensaje reenviado tiene video
+        if not forwarded_message or not hasattr(forwarded_message, 'video') or not forwarded_message.video:
+            await update.message.reply_text("❌ El mensaje reenviado no contiene un video.")
             return
 
-        video = message.video
+        video = forwarded_message.video
         file_id = video.file_id
         file_size_bytes = video.file_size
+
+        # Opcional: Borrar el mensaje reenviado para mantener el chat limpio
+        # try:
+        #     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=forwarded_message.message_id)
+        #     logger.info(f"Mensaje reenviado {forwarded_message.message_id} borrado.")
+        # except Exception as e:
+        #     logger.warning(f"No se pudo borrar el mensaje reenviado: {e}")
 
         # Obtener la ruta del archivo usando getFile
         file_info = await context.bot.get_file(file_id=file_id)
@@ -102,20 +113,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # --- Manejo de errores correcto para v20.x ---
-    except telegram.error.Unauthorized: # Este debería funcionar
+    except Unauthorized:
         await update.message.reply_text(
-            "❌ El bot no tiene permiso para leer mensajes de ese canal. "
+            "❌ El bot no tiene permiso para leer o reenviar mensajes de ese canal. "
             "Asegúrate de que sigue siendo administrador."
         )
-    except telegram.error.BadRequest as e: # Este también debería funcionar
+    except BadRequest as e:
         error_msg = str(e).lower()
-        if "message not found" in error_msg:
+        if "message to forward not found" in error_msg or "message not found" in error_msg:
             await update.message.reply_text("❌ No se encontró un mensaje con ese ID en el canal.")
         elif "chat not found" in error_msg:
              await update.message.reply_text("❌ No se pudo encontrar el canal. Verifica el enlace.")
         else:
             await update.message.reply_text(f"❌ Solicitud incorrecta de la API de Telegram: {e}")
-    except telegram.error.TelegramError as e: # Captura general para otros errores de la API
+    except TelegramError as e: # Captura general para otros errores de la API
          await update.message.reply_text(f"❌ Error de la API de Telegram: {e}")
     except Exception as e: # Captura cualquier otro error inesperado
         logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
@@ -124,6 +135,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Detalles: {e}\n\n"
             f"Por favor, inténtalo más tarde."
         )
+    finally:
+        # Intentar borrar el mensaje reenviado si se creó
+        if forwarded_message:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=forwarded_message.message_id
+                )
+                logger.info(f"Mensaje reenviado {forwarded_message.message_id} borrado en el finally.")
+            except Exception as e:
+                logger.warning(f"(Finally) No se pudo borrar el mensaje reenviado: {e}")
+
 
 def main():
     """Inicia el bot."""
@@ -135,7 +158,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Iniciar el bot
-    logger.info("Iniciando el bot (v20.7)...")
+    logger.info("Iniciando el bot (v20.7 - forward_message)...")
     application.run_polling()
 
 if __name__ == '__main__':
