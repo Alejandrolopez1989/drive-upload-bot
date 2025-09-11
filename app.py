@@ -1,4 +1,4 @@
-# app.py (Versión para canal privado)
+# app.py
 import os
 import logging
 from dotenv import load_dotenv
@@ -60,13 +60,17 @@ def get_streaming_link(update: Update, context: CallbackContext):
         return
 
     try:
-        # El bot, al ser administrador, puede acceder al mensaje por su ID en un canal privado
+        # --- CORRECCIÓN: Usar get_chat_message de manera compatible con v13.15 ---
+        # En v13.15, el método es get_message del bot, pero hay que pasarle el chat_id y message_id
+        # correctamente. Si falla, es probable por permisos o ID.
+        
+        # El método correcto en v13.15 es:
         message = context.bot.get_message(chat_id=CANAL_ID, message_id=message_id)
         logger.info(f"Mensaje obtenido: {message_id}")
 
         # Verificar si el mensaje tiene video
-        if not message.video:
-            update.message.reply_text("❌ El mensaje no contiene un video.")
+        if not message or not message.video:
+            update.message.reply_text("❌ El mensaje no contiene un video o no se pudo acceder.")
             return
 
         video = message.video
@@ -90,8 +94,18 @@ def get_streaming_link(update: Update, context: CallbackContext):
             parse_mode='Markdown'
         )
 
+    except telegram.error.Unauthorized:
+        update.message.reply_text(
+            "❌ El bot no tiene permiso para leer mensajes en ese canal. "
+            "Asegúrate de que sigue siendo administrador."
+        )
+    except telegram.error.BadRequest as e:
+        if "message not found" in str(e).lower():
+            update.message.reply_text("❌ No se encontró un mensaje con ese ID en el canal.")
+        else:
+            update.message.reply_text(f"❌ Solicitud incorrecta: {e}")
     except Exception as e:
-        logger.error(f"Error al procesar el enlace: {e}")
+        logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
         update.message.reply_text(
             f"❌ Error al obtener el enlace.\n"
             f"Asegúrate de:\n"
@@ -117,4 +131,6 @@ def main():
     updater.idle()
 
 if __name__ == '__main__':
+    # Asegurarse de importar telegram.error dentro de la función o al inicio
+    import telegram
     main()
