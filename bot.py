@@ -34,7 +34,7 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- FORZAR LA URI DE REDIRECCIÓN ---
 # Reemplaza TU_NOMBRE_DE_SERVICIO_EN_RENDER con el nombre real de tu servicio en Render
-RENDER_REDIRECT_URI = "https://TU_NOMBRE_DE_SERVICIO_EN_RENDER.onrender.com/oauth2callback"
+RENDER_REDIRECT_URI = "https://google-drive-vip.onrender.com/oauth2callback"
 
 # --- Inicialización ---
 app_quart = Quart(__name__)
