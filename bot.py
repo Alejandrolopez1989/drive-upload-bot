@@ -700,9 +700,14 @@ async def handle_user_email(client: Client, message: Message):
         # Notificar al administrador
         if ADMIN_TELEGRAM_ID:
             try:
+                # Obtener el username para el mensaje al admin
+                user_mention = message.from_user.username
+                user_display = f"@{user_mention}" if user_mention else user_name
+
                 admin_msg = (
                     f"📧 **Nuevo correo recibido para aprobación:**\n"
                     f"**Nombre:** {user_name}\n"
+                    f"**Usuario:** {user_display}\n" # <-- Incluir @username
                     f"**ID de Telegram:** `{user_id}`\n"
                     f"**Correo proporcionado:** `{email}`\n\n"
                     f"**Acción requerida:** Agrega este correo a 'Usuarios de prueba' en Google Cloud Console "
@@ -741,15 +746,15 @@ async def approve_user_command(client: Client, message: Message):
         await message.reply_text("❌ El ID de usuario debe ser un número.")
         return
 
-    # --- Modificación: Aprobar incluso si no hay correo pendiente ---
-    # Verificar si el usuario tiene un correo pendiente (opcional, para info)
+    # --- Corrección: Asegurar aprobación y notificación ---
+    # Verificar si el usuario tiene un correo pendiente (para información)
     user_email = pending_emails.get(target_user_id, "No proporcionado")
-    if target_user_id not in pending_emails:
-        # Opcional: Notificar que no había correo pendiente
-        await message.reply_text(f"⚠️ El usuario `{target_user_id}` no tenía un correo pendiente, pero será aprobado igualmente.")
 
-    # Marcar al usuario como aprobado
+    # Marcar al usuario como aprobado (independientemente de si tenía correo pendiente)
     approved_users.add(target_user_id)
+
+    # Opcional: Eliminar el correo pendiente si ya no se necesita
+    # pending_emails.pop(target_user_id, None)
 
     # Notificar al administrador
     await message.reply_text(f"✅ Usuario `{target_user_id}` aprobado. "
@@ -763,6 +768,7 @@ async def approve_user_command(client: Client, message: Message):
             f"Por favor, usa el comando `/drive_login` nuevamente para obtener el enlace de autenticación con Google."
         )
         await client.send_message(target_user_id, user_msg)
+        #await message.reply_text("✅ Usuario notificado con éxito.") # Opcional: confirmar al admin
     except Exception as e:
         logger.error(f"Error al notificar al usuario {target_user_id} de aprobación: {e}")
         await message.reply_text(f"⚠️ El usuario fue aprobado, pero no se pudo enviarle el mensaje de confirmación: {e}")
