@@ -25,6 +25,8 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 # --- CONFIGURACIÓN DEL ADMINISTRADOR ---
 # Se obtiene de la variable de entorno. Asegúrate de configurarla en Render.
 ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", 0)) # 0 por defecto si no está configurada
+# Correo del administrador (puedes dejarlo fijo aquí o en una variable de entorno)
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "telegramprueba30@gmail.com") # Correo fijo o configurable
 
 # --- CONFIGURACIÓN DE GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
@@ -274,6 +276,55 @@ async def drive_login_command(client: Client, message: Message):
         await message.reply_text("✅ Tu cuenta de Google Drive ya está conectada.")
         return
 
+    # --- Excepción para el Administrador ---
+    # Si el usuario es el administrador, le damos acceso directo al enlace.
+    if user_id == ADMIN_TELEGRAM_ID:
+        await message.reply_text(
+            f"✅ ¡Hola Administrador {user_name}!\n"
+            "Como administrador, tienes acceso directo al enlace de autenticación.\n"
+            "Asegúrate de que tu correo (`{ADMIN_EMAIL}`) esté agregado como 'Usuario de prueba' en Google Cloud Console."
+        )
+        # Proceder directamente con el flujo de OAuth
+        # Generar un 'state' único para esta solicitud
+        state = secrets.token_urlsafe(32)
+        login_states[state] = user_id # Asociar state con user_id
+
+        creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        if not creds_ # <-- Corrección aquí
+            await message.reply_text("❌ Error del servidor: Credenciales de Google no configuradas.")
+            return
+
+        try:
+            async with aiofiles.open('credentials_temp.json', 'w') as f:
+                await f.write(creds_data)
+
+            flow = Flow.from_client_secrets_file(
+                'credentials_temp.json', scopes=SCOPES,
+                redirect_uri=RENDER_REDIRECT_URI)
+            # Pasar el 'state' generado
+            authorization_url, _ = flow.authorization_url(
+                access_type='offline',
+                include_granted_scopes='true',
+                state=state)
+
+            login_url = authorization_url
+
+            # --- Mensaje al Admin con el enlace ---
+            await message.reply_text(
+                f"**Haz clic en el siguiente enlace para iniciar el proceso de autenticación con Google:**\n"
+                f"{login_url}\n\n"
+                "**Importante:** Asegúrate de que tu correo esté en la lista de prueba."
+            )
+
+        except Exception as e:
+            logger.error(f"Error al iniciar login para el administrador {user_id}: {e}")
+            await message.reply_text("❌ Ocurrió un error al iniciar el proceso de login. Inténtalo de nuevo más tarde.")
+        finally:
+            if os.path.exists('credentials_temp.json'):
+                os.remove('credentials_temp.json')
+        return # Salir, no seguir con el flujo normal de usuarios
+
+    # --- Flujo normal para usuarios no-administradores ---
     # Verificar si el usuario ha sido aprobado por el administrador
     if user_id not in approved_users:
         # Verificar si ya envió su correo
@@ -306,7 +357,7 @@ async def drive_login_command(client: Client, message: Message):
     login_states[state] = user_id # Asociar state con user_id
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_data: # <-- Corrección aquí
+    if not creds_ # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales de Google no configuradas.")
         # Notificar al admin del error crítico
         if ADMIN_TELEGRAM_ID:
@@ -626,17 +677,19 @@ async def delete_file(client: Client, message: Message):
         await status_message.edit_text("❌ Error al eliminar el video de tu Google Drive o el video no existe.")
 
 
-# --- Nuevo manejador para recibir el correo del usuario ---
+# --- Nuevo manejador para recibir el correo del usuario (excluyendo al admin) ---
 @app_telegram.on_message(filters.text & filters.private & ~filters.me)
 async def handle_user_email(client: Client, message: Message):
     user_id = message.from_user.id
+    # Excluir al administrador de este flujo
+    if user_id == ADMIN_TELEGRAM_ID:
+        return # El admin usa /drive_login directamente
+
     user_name = message.from_user.first_name or message.from_user.username or "Usuario"
     text = message.text.strip()
 
     # Solo procesar si el usuario no está autenticado ni aprobado
     if is_user_authenticated(user_id) or user_id in approved_users:
-        # Si ya está autenticado o aprobado, ignoramos el texto
-        # O podrías enviar un mensaje de que ya está todo listo
         return
 
     # Verificar si parece un correo electrónico válido (básico)
@@ -688,18 +741,15 @@ async def approve_user_command(client: Client, message: Message):
         await message.reply_text("❌ El ID de usuario debe ser un número.")
         return
 
-    # Verificar si el usuario tiene un correo pendiente
+    # --- Modificación: Aprobar incluso si no hay correo pendiente ---
+    # Verificar si el usuario tiene un correo pendiente (opcional, para info)
+    user_email = pending_emails.get(target_user_id, "No proporcionado")
     if target_user_id not in pending_emails:
-        await message.reply_text(f"⚠️ No hay un correo pendiente para el usuario `{target_user_id}`. "
-                                f"Asegúrate de que el usuario haya enviado su correo primero.",
-                                parse_mode=enums.ParseMode.MARKDOWN)
-        return
+        # Opcional: Notificar que no había correo pendiente
+        await message.reply_text(f"⚠️ El usuario `{target_user_id}` no tenía un correo pendiente, pero será aprobado igualmente.")
 
-    user_email = pending_emails.get(target_user_id)
     # Marcar al usuario como aprobado
     approved_users.add(target_user_id)
-    # Opcional: Eliminar el correo pendiente si ya no se necesita
-    # del pending_emails[target_user_id]
 
     # Notificar al administrador
     await message.reply_text(f"✅ Usuario `{target_user_id}` aprobado. "
@@ -742,7 +792,7 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_data: # <-- Corrección aquí
+    if not creds_ # <-- Corrección aquí
         # No se puede enviar mensaje a Telegram desde aquí fácilmente sin más setup
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado en el servidor.", 500
 
