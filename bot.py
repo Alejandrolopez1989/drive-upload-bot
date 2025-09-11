@@ -235,7 +235,7 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if not creds_data:
+        if not creds_
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
         try:
@@ -515,11 +515,12 @@ async def delete_file(client: Client, message: Message):
     else:
         await status_message.edit_text("❌ Error al eliminar el video de tu Google Drive.")
 
-# --- Manejador para correos de usuarios ---
+# --- Manejador para correos de usuarios (CORREGIDO) ---
+# El cambio clave está aquí: ~filters.regex(r"^/") excluye todos los comandos
 @app_telegram.on_message(filters.text & filters.private & ~filters.me & ~filters.regex(r"^/"))
 async def handle_user_email(client: Client, message: Message):
     user_id = message.from_user.id
-    # Ya no necesitamos el 'if' para ADMIN_TELEGRAM_ID porque el filtro ~filters.regex(r"^/") lo excluye
+    # Ya no necesitamos verificar ADMIN_TELEGRAM_ID aquí gracias al filtro ~filters.regex(r"^/")
     # if user_id == ADMIN_TELEGRAM_ID:
     #     return
 
@@ -555,16 +556,8 @@ async def handle_user_email(client: Client, message: Message):
              await message.reply_text("⚠️ El administrador no ha configurado su ID.")
     else:
          await message.reply_text("Por favor, envíame únicamente tu correo de Google. Ej: `tu@gmail.com`", parse_mode=enums.ParseMode.MARKDOWN)
-                await message.reply_text("✅ Correo recibido. El administrador ha sido notificado.")
-            except Exception as e:
-                logger.error(f"Error notificando admin: {e}")
-                await message.reply_text("❌ Error al procesar tu correo.")
-        else:
-             await message.reply_text("⚠️ El administrador no ha configurado su ID.")
-    else:
-         await message.reply_text("Por favor, envíame únicamente tu correo de Google. Ej: `tu@gmail.com`", parse_mode=enums.ParseMode.MARKDOWN)
 
-# --- Comando para aprobar usuarios (CORREGIDO Y SIMPLIFICADO) ---
+# --- Comando para aprobar usuarios ---
 @app_telegram.on_message(filters.command("aprobar_usuario") & filters.private)
 async def approve_user_command(client: Client, message: Message):
     logger.info(f"✅ /aprobar_usuario recibido de {message.from_user.id}")
@@ -645,7 +638,7 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_data:
+    if not creds_
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
 
     try:
