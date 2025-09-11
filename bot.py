@@ -290,7 +290,7 @@ async def drive_login_command(client: Client, message: Message):
         login_states[state] = user_id # Asociar state con user_id
 
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if not creds_ # <-- Corrección aquí
+        if not creds_data: # <-- Corrección aquí
             await message.reply_text("❌ Error del servidor: Credenciales de Google no configuradas.")
             return
 
@@ -357,7 +357,7 @@ async def drive_login_command(client: Client, message: Message):
     login_states[state] = user_id # Asociar state con user_id
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_ # <-- Corrección aquí
+    if not creds_data: # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales de Google no configuradas.")
         # Notificar al admin del error crítico
         if ADMIN_TELEGRAM_ID:
@@ -821,7 +821,7 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_ # <-- Corrección aquí
+    if not creds_data: # <-- Corrección aquí
         # No se puede enviar mensaje a Telegram desde aquí fácilmente sin más setup
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado en el servidor.", 500
 
