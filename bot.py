@@ -229,28 +229,28 @@ async def set_bot_commands(client: Client):
 # --- Función para actualizar mensajes de usuarios en cola ---
 async def update_queue_messages(client: Client):
     """Actualiza los mensajes de estado para todos los usuarios en la cola."""
-    # Declaración global al inicio de la función
-    global upload_queue
-    temp_queue = deque()
-    while upload_queue:
-        user_id, orig_msg = upload_queue.popleft()
-        position = len(temp_queue) + 1 # Calculamos la nueva posición
+    # Creamos una copia temporal para iterar y modificar
+    temp_queue = list(upload_queue)
+    upload_queue.clear()
+    
+    for i, (user_id, orig_msg) in enumerate(temp_queue):
+        position = i + 1
         try:
             await client.edit_message_text(
                 orig_msg.chat.id, orig_msg.id,
                 f"⏳ Tu video está en cola. Posición: {position}",
                 parse_mode=enums.ParseMode.MARKDOWN
             )
+            # Re-agregamos a la cola actualizada
+            upload_queue.append((user_id, orig_msg))
         except Exception as e:
             logger.warning(f"No se pudo actualizar mensaje de cola para {user_id}: {e}")
-        temp_queue.append((user_id, orig_msg))
-    # Restaurar la cola
-    upload_queue = temp_queue
+            # Si falla, lo volvemos a meter a la cola para intentarlo de nuevo
+            upload_queue.append((user_id, orig_msg))
 
 # --- Función para procesar la cola ---
 async def process_queue(client: Client):
     """Toma el primer elemento de la cola y lo procesa."""
-    global active_operations
     if active_operations:
         return # Si ya hay una operación activa, no procesamos
 
@@ -258,7 +258,7 @@ async def process_queue(client: Client):
         user_id, original_message = upload_queue.popleft()
         # Actualizar mensajes de los usuarios restantes en cola
         await update_queue_messages(client)
-        # Iniciar el procesamiento real, pasando el mensaje original
+        # Iniciar el procesamiento real
         await handle_video_from_queue(client, original_message)
 
 # --- Manejador modificado para videos ---
@@ -271,10 +271,9 @@ async def handle_video(client: Client, message: Message):
         return
 
     # --- Sistema de Cola ---
-    global active_operations
+    # El administrador también entra en la cola si hay operaciones activas
     if active_operations:
         # Si hay una operación activa, añadir a la cola
-        global upload_queue
         position = len(upload_queue) + 1
         upload_queue.append((user_id, message))
         # Editar el mensaje del usuario para mostrar que está en cola
@@ -315,7 +314,6 @@ async def handle_video_from_queue(client: Client, original_message: Message):
     try:
         cancel_flag = asyncio.Event()
         # Registrar la operación activa con el mensaje original
-        global active_operations
         active_operations[user_id] = {
             'task': asyncio.current_task(),
             'file_path': None,
@@ -485,7 +483,6 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("❌ No puedes cancelar la operación de otro usuario.", show_alert=True)
             return
 
-        global active_operations
         if user_id in active_operations:
             operation = active_operations[user_id]
             operation['cancel_flag'].set()
@@ -501,7 +498,7 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
 
-# --- Comandos restantes ---
+# --- Comandos restantes (sin cambios sustanciales) ---
 @app_telegram.on_message(filters.command("drive_login"))
 async def drive_login_command(client: Client, message: Message):
     user_id = message.from_user.id
@@ -519,7 +516,7 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if not creds_data: # <-- Corrección aquí
+        if not creds_ # <-- Corrección aquí
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
         try:
@@ -564,7 +561,7 @@ async def drive_login_command(client: Client, message: Message):
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_data: # <-- Corrección aquí
+    if not creds_ # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
             try:
@@ -848,7 +845,7 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_data: # <-- Corrección aquí
+    if not creds_ # <-- Corrección aquí
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
 
     try:
