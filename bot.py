@@ -590,54 +590,54 @@ async def handle_video(client: Client, message: Message):
     task_id = str(uuid.uuid4())
     file_name = message.video.file_name or 'video.mp4'
     
-    # --- NUEVO: Calcular posición antes de incrementar el contador ---
+    # --- Calcular posición ---
     current_queue_size = upload_queue.qsize()
     new_position = current_queue_size + 1 # Posición 1-indexed
     
-    # Incrementar el contador global *después* de calcular la posición
+    # Incrementar el contador global
     total_uploads_queued += 1
-    # --- FIN NUEVO ---
     
     queue_item = {
         'task_id': task_id,
         'user_id': user_id,
-        'message': message, # Pasar el objeto completo
+        'message': message,
         'file_name': file_name
     }
     
-    # --- CORREGIDO: Almacenar en queued_tasks primero ---
-    # Almacenar la información de la tarea en queued_tasks *antes* de enviar mensajes o poner en cola
+    # --- Almacenar en queued_tasks primero ---
     queued_tasks[task_id] = {
         'user_id': user_id,
         'message_id': message.id,
         'file_name': file_name,
         'position': new_position,
-        'queue_status_message_id': None, # Se actualizará después
+        'queue_status_message_id': None, # Se actualizará si se envía mensaje
         'chat_id': message.chat.id
     }
     
     # Poner la tarea en la cola de procesamiento
     await upload_queue.put(queue_item)
     
-    # --- MODIFICADO: Informar al usuario y actualizar queued_tasks con el message_id del mensaje ---
+    # --- MODIFICADO: Solo enviar mensaje de cola si hay otros en cola ---
     queue_status_message = None
-    try:
-        # Enviar el mensaje de estado de cola al usuario
-        queue_status_message = await message.reply_text(f"⏳ Su video está en cola. Posición: {new_position}.")
-        
-        # Actualizar queued_tasks con el message_id del mensaje enviado
-        queued_tasks[task_id]['queue_status_message_id'] = queue_status_message.id
-        
-    except Exception as e:
-        logger.error(f"Error enviando mensaje de cola al usuario {user_id} para tarea {task_id}: {e}")
-        # Si falla al enviar el mensaje, eliminar la tarea de queued_tasks
-        queued_tasks.pop(task_id, None)
-        # NOTA: La tarea sigue en upload_queue, pero process_upload_queue la descartará.
-        await message.reply_text("⚠️ Hubo un error al notificarte sobre tu posición en la cola. El video se procesará igualmente si es posible.")
-    # --- FIN MODIFICADO ---
+    # Si la cola estaba vacía (current_queue_size == 0), no enviamos mensaje de cola.
+    # El primer video se procesará inmediatamente o muy pronto.
+    # Solo si hay al menos uno ya en cola (current_queue_size > 0), mostramos posición.
+    if current_queue_size > 0: 
+        try:
+            # Enviar el mensaje de estado de cola al usuario
+            queue_status_message = await message.reply_text(f"⏳ Su video está en cola. Posición: {new_position}.")
+            # Actualizar queued_tasks con el message_id del mensaje enviado
+            queued_tasks[task_id]['queue_status_message_id'] = queue_status_message.id
+        except Exception as e:
+            logger.error(f"Error enviando mensaje de cola al usuario {user_id} para tarea {task_id}: {e}")
+            # Si falla, el video sigue en la cola y se procesará, pero sin mensaje de posición.
+            # No eliminamos de queued_tasks como antes, solo no guardamos el message_id.
+            await message.reply_text("⚠️ Hubo un error al notificarte sobre tu posición en la cola. El video se procesará igualmente.")
+    
+    # Si current_queue_size == 0, no se envía mensaje de cola.
+    # El mensaje "Descargando..." vendrá del process_upload_queue.
 
-    logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición: {new_position}")
-
+    logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición: {new_position}.")
 
 @app_telegram.on_callback_query()
 async def on_callback_query(client: Client, callback_query: CallbackQuery):
