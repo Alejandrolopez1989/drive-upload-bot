@@ -232,7 +232,7 @@ async def update_queue_messages(client: Client):
     # Creamos una copia temporal para iterar y modificar
     temp_queue = list(upload_queue)
     upload_queue.clear()
-    
+
     for i, (user_id, orig_msg) in enumerate(temp_queue):
         position = i + 1
         try:
@@ -271,7 +271,7 @@ async def handle_video(client: Client, message: Message):
         return
 
     # --- Sistema de Cola ---
-    # El administrador también entra en la cola si hay operaciones activas
+    # Todos los usuarios, incluido el admin, entran en la cola si hay operaciones activas
     if active_operations:
         # Si hay una operación activa, añadir a la cola
         position = len(upload_queue) + 1
@@ -498,7 +498,7 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
 
-# --- Comandos restantes (sin cambios sustanciales) ---
+# --- Comandos restantes ---
 @app_telegram.on_message(filters.command("drive_login"))
 async def drive_login_command(client: Client, message: Message):
     user_id = message.from_user.id
@@ -516,7 +516,8 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if not creds_ # <-- Corrección aquí
+        # CORRECCIÓN AQUÍ: Usar creds_data y agregar :
+        if not creds_data: # <-- Corrección aquí
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
         try:
@@ -561,7 +562,8 @@ async def drive_login_command(client: Client, message: Message):
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_ # <-- Corrección aquí
+    # CORRECCIÓN AQUÍ: Usar creds_data y agregar :
+    if not creds_data: # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
             try:
@@ -845,7 +847,8 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_ # <-- Corrección aquí
+    # CORRECCIÓN AQUÍ: Usar creds_data y agregar :
+    if not creds_data: # <-- Corrección aquí
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
 
     try:
