@@ -240,26 +240,31 @@ async def process_upload_queue(client: Client):
             queue_item = await upload_queue.get()
             task_id = queue_item['task_id']
             
+            # --- CORREGIDO: Verificar primero, luego poppear ---
+            # Verificar si la tarea aún existe en queued_tasks antes de procesarla
+            # Si fue cancelada mientras esperaba, ya no estará.
             if task_id not in queued_tasks:
-                logger.info(f"Tarea {task_id} fue cancelada mientras estaba en cola.")
+                logger.info(f"Tarea {task_id} fue cancelada o eliminada mientras estaba en cola.")
                 upload_queue.task_done()
                 continue
 
-            user_id = queue_item['user_id']
+            # Si la tarea existe, entonces la procesamos. Poppearla aquí es correcto.
+            task_info = queued_tasks.pop(task_id, None) 
+            
+            # Extraer información de task_info o queue_item
+            user_id = queue_item['user_id'] # O task_info['user_id'] si se almacenó allí
             message: Message = queue_item['message']
             file_name = queue_item.get('file_name', 'video.mp4')
             
             logger.info(f"Iniciando procesamiento de video en cola para user {user_id}, tarea {task_id}")
+            # --- FIN CORREGIDO ---
 
-            # Mover la tarea de 'en cola' a 'activa'
-            task_info = queued_tasks.pop(task_id, None) # Obtener info antes de eliminarla
-            chat_id_for_updates = message.chat.id
-            
             # --- MODIFICADO: Actualizar posiciones y mensajes de las tareas restantes en cola ---
-            total_uploads_queued -= 1
+            # Decrementar el contador global *antes* de actualizar posiciones
+            total_uploads_queued -= 1 
             tasks_to_update = list(queued_tasks.keys())
             for tid in tasks_to_update:
-                 if tid in queued_tasks:
+                 if tid in queued_tasks: # Verificación de seguridad doble
                     old_pos = queued_tasks[tid].get('position', 0)
                     if old_pos > 0:
                         new_pos = old_pos - 1
@@ -270,6 +275,7 @@ async def process_upload_queue(client: Client):
                         target_user_id = queued_tasks[tid].get('user_id')
                         if queue_msg_id and target_user_id:
                             task_chat_id = queued_tasks[tid].get('chat_id', target_user_id)
+                            # Usar asyncio.create_task para no bloquear el bucle principal
                             asyncio.create_task(update_queue_status_message(client, target_user_id, task_chat_id, queue_msg_id, new_pos))
             # --- FIN MODIFICADO ---
 
