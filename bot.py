@@ -211,7 +211,7 @@ async def update_status_message(client: Client, chat_id: int, message_id: int, t
             await client.edit_message_text(chat_id, message_id, text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True, reply_markup=reply_markup)
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
-            logger.error(f"Error actualizando mensaje: {e}")
+            logger.error(f"Error actualizando mensaje de estado: {e}")
 
 # --- NUEVA: Función para actualizar el mensaje de estado de cola ---
 async def update_queue_status_message(client: Client, user_id: int, chat_id: int, message_id: int, position: int):
@@ -220,195 +220,206 @@ async def update_queue_status_message(client: Client, user_id: int, chat_id: int
     """
     try:
         if position <= 0:
-            # Si la posición es 0 o negativa, probablemente esté siendo procesado o cancelado
             if position == 0:
                  await client.edit_message_text(chat_id, message_id, "⏳ Su video está próximo a ser procesado.", parse_mode=enums.ParseMode.MARKDOWN)
         else:
             await client.edit_message_text(chat_id, message_id, f"⏳ Su video está en cola. Posición: {position}.", parse_mode=enums.ParseMode.MARKDOWN)
     except Exception as e:
-        # Es común que falle si el mensaje ya fue editado o borrado
         if "MESSAGE_NOT_MODIFIED" not in str(e) and "Message to edit not found" not in str(e):
             logger.warning(f"Error actualizando mensaje de cola para user {user_id}, msg_id {message_id}: {e}")
-        # No es crítico si falla la actualización del mensaje
 
-# --- MODIFICADO: Función para procesar la cola de subidas con actualización de mensajes ---
+# --- CORREGIDO Y ROBUSTECIDO: Función para procesar la cola de subidas ---
 async def process_upload_queue(client: Client):
     """Función asíncrona continua que procesa videos de la cola."""
     global total_uploads_queued
     while True:
+        task_id = None # Variable para rastrear task_id en el bloque finally
         try:
             queue_item = await upload_queue.get()
-            task_id = queue_item['task_id']
-            
-            # --- CORREGIDO: Verificar primero, luego poppear ---
-            # Verificar si la tarea aún existe en queued_tasks antes de procesarla
-            # Si fue cancelada mientras esperaba, ya no estará.
+            task_id = queue_item['task_id'] # Guardar task_id inmediatamente
+
+            # --- VERIFICACIÓN Y EXTRACCIÓN CORRECTA ---
             if task_id not in queued_tasks:
                 logger.info(f"Tarea {task_id} fue cancelada o eliminada mientras estaba en cola.")
-                upload_queue.task_done()
-                continue
+                # NO llamamos task_done() aquí, porque upload_queue.get() ya lo sacó
+                # task_done() se llamará en el finally
+                continue # Pasar a la siguiente iteración del bucle
 
-            # Si la tarea existe, entonces la procesamos. Poppearla aquí es correcto.
-            task_info = queued_tasks.pop(task_id, None) 
-            
-            # Extraer información de task_info o queue_item
-            user_id = queue_item['user_id'] # O task_info['user_id'] si se almacenó allí
+            # Si la tarea existe, extraemos la información y la eliminamos de queued_tasks
+            task_info = queued_tasks.pop(task_id, None)
+            if not task_info:
+                 logger.warning(f"Tarea {task_id} desapareció de queued_tasks justo antes de procesarla.")
+                 continue
+
+            # Extraer información
+            user_id = queue_item['user_id']
             message: Message = queue_item['message']
             file_name = queue_item.get('file_name', 'video.mp4')
-            
-            logger.info(f"Iniciando procesamiento de video en cola para user {user_id}, tarea {task_id}")
-            # --- FIN CORREGIDO ---
 
-            # --- MODIFICADO: Actualizar posiciones y mensajes de las tareas restantes en cola ---
-            # Decrementar el contador global *antes* de actualizar posiciones
-            total_uploads_queued -= 1 
+            logger.info(f"Iniciando procesamiento de video en cola para user {user_id}, tarea {task_id}")
+
+            # --- ACTUALIZAR POSICIONES Y MENSAJES DE LAS TAREAS RESTANTES EN COLA ---
+            total_uploads_queued -= 1
             tasks_to_update = list(queued_tasks.keys())
             for tid in tasks_to_update:
-                 if tid in queued_tasks: # Verificación de seguridad doble
+                if tid in queued_tasks:
                     old_pos = queued_tasks[tid].get('position', 0)
                     if old_pos > 0:
                         new_pos = old_pos - 1
                         queued_tasks[tid]['position'] = new_pos
-                        
-                        # --- NUEVO: Actualizar mensaje del usuario ---
+
+                        # Actualizar mensaje del usuario
                         queue_msg_id = queued_tasks[tid].get('queue_status_message_id')
                         target_user_id = queued_tasks[tid].get('user_id')
                         if queue_msg_id and target_user_id:
                             task_chat_id = queued_tasks[tid].get('chat_id', target_user_id)
-                            # Usar asyncio.create_task para no bloquear el bucle principal
                             asyncio.create_task(update_queue_status_message(client, target_user_id, task_chat_id, queue_msg_id, new_pos))
-            # --- FIN MODIFICADO ---
+            # --- FIN ACTUALIZACIÓN ---
 
-            # ... (resto de la lógica de procesamiento, sin cambios) ...
+            # --- LÓGICA DE PROCESAMIENTO (DESCARGA Y SUBIDA) ---
+            # Verificaciones iniciales
             if not is_user_authenticated(user_id):
-                 await message.reply_text("❌ Tu cuenta de Google Drive ya no está conectada. Por favor, vuelve a autenticarte con /drive_login.")
-                 upload_queue.task_done()
-                 continue
+                await message.reply_text("❌ Tu cuenta de Google Drive ya no está conectada. Por favor, vuelve a autenticarte con /drive_login.")
+                # task_done() se llamará en el finally
+                continue
 
             service = get_user_drive_service(user_id)
             if not service:
                 await message.reply_text("❌ Problema de conexión con tu Drive. Intenta desconectarte y reconectarte.")
-                upload_queue.task_done()
+                # task_done() se llamará en el finally
                 continue
 
-            # --- Lógica de descarga y subida (extraída de handle_video) ---
-            try:
-                cancel_flag = asyncio.Event()
-                cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{task_id}")]]
-                reply_markup = InlineKeyboardMarkup(cancel_button)
-                status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
-                status_message_id = status_message.id
-                active_operations[task_id] = {
-                    'task': asyncio.current_task(),
-                    'file_path': None,
-                    'status_message_id': status_message_id,
-                    'cancel_flag': cancel_flag,
-                    'user_id': user_id,
-                    'message': message
-                }
-                last_update = time.time()
-                main_loop = asyncio.get_running_loop()
-                last_shown_progress = 0
+            # Descarga y subida
+            cancel_flag = asyncio.Event()
+            cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{task_id}")]]
+            reply_markup = InlineKeyboardMarkup(cancel_button)
+            status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
+            status_message_id = status_message.id
+            active_operations[task_id] = {
+                'task': asyncio.current_task(),
+                'file_path': None,
+                'status_message_id': status_message_id,
+                'cancel_flag': cancel_flag,
+                'user_id': user_id,
+                'message': message
+            }
 
-                def progress_callback(current, total):
-                    nonlocal last_update, last_shown_progress
-                    current_time = time.time()
-                    if cancel_flag.is_set():
-                        raise Exception("Operación cancelada por el usuario.")
-                    if current_time - last_update > 2 or current == total:
-                        if total > 0:
-                            progress = int((current / total) * 100)
-                            milestones = [0, 25, 50, 75, 100]
-                            current_milestone = 0
-                            for m in reversed(milestones):
-                                if progress >= m:
-                                    current_milestone = m
-                                    break
-                            if current_milestone > last_shown_progress:
-                                main_loop.call_soon_threadsafe(
-                                    asyncio.create_task,
-                                    update_status_message(client, message.chat.id, status_message_id, f"📥 Descargando el video... {current_milestone}%", user_id)
-                                )
-                                last_shown_progress = current_milestone
-                        last_update = current_time
+            last_update = time.time()
+            main_loop = asyncio.get_running_loop()
+            last_shown_progress = 0
 
-                file_path = await client.download_media(message, progress=progress_callback)
+            def progress_callback(current, total):
+                nonlocal last_update, last_shown_progress
+                current_time = time.time()
                 if cancel_flag.is_set():
-                    await update_status_message(client, message.chat.id, status_message_id, "❌ Operación cancelada durante la descarga.", user_id, remove_buttons=True)
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    active_operations.pop(task_id, None)
-                    upload_queue.task_done()
-                    continue
-                
-                await update_status_message(client, message.chat.id, status_message_id, "📥 Descargando el video... 100%", user_id)
-                await asyncio.sleep(0.5)
-                active_operations[task_id]['file_path'] = file_path
-                await update_status_message(client, message.chat.id, status_message_id, "☁️ Subiendo a tu Google Drive... 0%", user_id)
-                last_shown_progress_upload = 0
-                main_loop_upload = asyncio.get_running_loop()
+                    raise Exception("Operación cancelada por el usuario.")
+                if current_time - last_update > 2 or current == total:
+                    if total > 0:
+                        progress = int((current / total) * 100)
+                        milestones = [0, 25, 50, 75, 100]
+                        current_milestone = 0
+                        for m in reversed(milestones):
+                            if progress >= m:
+                                current_milestone = m
+                                break
+                        if current_milestone > last_shown_progress:
+                            main_loop.call_soon_threadsafe(
+                                asyncio.create_task,
+                                update_status_message(client, message.chat.id, status_message_id, f"📥 Descargando el video... {current_milestone}%", user_id)
+                            )
+                            last_shown_progress = current_milestone
+                    last_update = current_time
 
-                def update_upload_progress(progress):
-                    nonlocal last_shown_progress_upload
-                    if cancel_flag.is_set():
-                        raise Exception("Operación cancelada por el usuario.")
-                    milestones = [0, 25, 50, 75, 100]
-                    current_milestone = 0
-                    for m in reversed(milestones):
-                        if progress >= m:
-                            current_milestone = m
-                            break
-                    if current_milestone > last_shown_progress_upload:
-                        main_loop_upload.call_soon_threadsafe(
-                            asyncio.create_task,
-                            update_status_message(client, message.chat.id, status_message_id, f"☁️ Subiendo a tu Google Drive... {current_milestone}%", user_id)
-                        )
-                        last_shown_progress_upload = current_milestone
+            file_path = await client.download_media(message, progress=progress_callback)
+            # Si se cancela durante la descarga, se lanza una excepción y se maneja en el except general
+            
+            await update_status_message(client, message.chat.id, status_message_id, "📥 Descargando el video... 100%", user_id)
+            await asyncio.sleep(0.5)
+            active_operations[task_id]['file_path'] = file_path
+            await update_status_message(client, message.chat.id, status_message_id, "☁️ Subiendo a tu Google Drive... 0%", user_id)
+            
+            last_shown_progress_upload = 0
+            main_loop_upload = asyncio.get_running_loop()
 
-                final_file_name = f"video_{message.video.file_unique_id}_{file_name}"
-                file_id = await upload_to_drive_with_progress(user_id, file_path, final_file_name, update_upload_progress, cancel_flag)
+            def update_upload_progress(progress):
+                nonlocal last_shown_progress_upload
                 if cancel_flag.is_set():
-                    await update_status_message(client, message.chat.id, status_message_id, "❌ Operación cancelada durante la subida.", user_id, remove_buttons=True)
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    active_operations.pop(task_id, None)
-                    upload_queue.task_done()
-                    continue
-                
-                if file_id:
-                    file_url = get_file_url(file_id)
-                    await update_status_message(client, message.chat.id, status_message_id,
-                        f"✅ ¡Video subido exitosamente a tu Google Drive!\n\n"
-                        f"🔗 [Descargar Video]({file_url})\n\n"
-                        f"Usa /ver_nube para ver y gestionar tus videos.",
-                        user_id, remove_buttons=True
+                    raise Exception("Operación cancelada por el usuario.")
+                milestones = [0, 25, 50, 75, 100]
+                current_milestone = 0
+                for m in reversed(milestones):
+                    if progress >= m:
+                        current_milestone = m
+                        break
+                if current_milestone > last_shown_progress_upload:
+                    main_loop_upload.call_soon_threadsafe(
+                        asyncio.create_task,
+                        update_status_message(client, message.chat.id, status_message_id, f"☁️ Subiendo a tu Google Drive... {current_milestone}%", user_id)
                     )
-                else:
-                    await update_status_message(client, message.chat.id, status_message_id, "❌ Error al subir el video a tu Google Drive.", user_id, remove_buttons=True)
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception as e:
-                if "Operación cancelada por el usuario" in str(e):
-                    pass
-                else:
-                    logger.error(f"Error en process_upload_queue para tarea {task_id} (user {user_id}): {e}")
-                    status_message_id = active_operations.get(task_id, {}).get('status_message_id')
-                    if status_message_id:
-                        await update_status_message(client, message.chat.id, status_message_id, f"❌ Ocurrió un error: {str(e)}", user_id, remove_buttons=True)
-                    try:
-                        if 'file_path' in locals() and os.path.exists(file_path):
-                            os.remove(file_path)
-                    except: pass
-            finally:
-                active_operations.pop(task_id, None)
-                upload_queue.task_done()
-                
+                    last_shown_progress_upload = current_milestone
+
+            final_file_name = f"video_{message.video.file_unique_id}_{file_name}"
+            file_id = await upload_to_drive_with_progress(user_id, file_path, final_file_name, update_upload_progress, cancel_flag)
+            # Si se cancela durante la subida, se lanza una excepción y se maneja en el except general
+
+            # --- RESULTADO FINAL ---
+            if file_id:
+                file_url = get_file_url(file_id)
+                await update_status_message(client, message.chat.id, status_message_id,
+                    f"✅ ¡Video subido exitosamente a tu Google Drive!\n\n"
+                    f"🔗 [Descargar Video]({file_url})\n\n"
+                    f"Usa /ver_nube para ver y gestionar tus videos.",
+                    user_id, remove_buttons=True
+                )
+            else:
+                await update_status_message(client, message.chat.id, status_message_id, "❌ Error al subir el video a tu Google Drive.", user_id, remove_buttons=True)
+            
+            # Limpiar archivo temporal
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
         except asyncio.CancelledError:
             logger.info("Tarea de procesamiento de cola cancelada.")
-            break
+            raise # Re-lanzar para que el manejador de cancelación lo capture correctamente si es necesario
         except Exception as e:
-            logger.error(f"Error inesperado en process_upload_queue: {e}")
-            upload_queue.task_done()
+            # Manejo general de errores para cualquier excepción no capturada durante el procesamiento
+            logger.error(f"Error en process_upload_queue para tarea {task_id}: {e}", exc_info=True)
+            # Intentar notificar al usuario si es posible
+            if task_id and task_id in active_operations:
+                status_msg_id = active_operations[task_id].get('status_message_id')
+                user_id_op = active_operations[task_id].get('user_id')
+                chat_id_op = active_operations[task_id].get('message').chat.id if active_operations[task_id].get('message') else user_id_op
+                if status_msg_id and user_id_op:
+                    try:
+                        await update_status_message(client, chat_id_op, status_msg_id, f"❌ Ocurrió un error: {str(e)}", user_id_op, remove_buttons=True)
+                    except Exception as notify_e:
+                        logger.error(f"Error notificando error al usuario {user_id_op}: {notify_e}")
+            
+            # Limpiar archivo temporal si existe en el contexto del error
+            try:
+                if 'file_path' in locals() and os.path.exists(file_path):
+                    os.remove(file_path)
+            except:
+                pass # Ignorar errores al limpiar
+
+        finally:
+            # --- BLOQUE FINALLY CRÍTICO: Asegurar task_done y limpieza ---
+            # Este bloque se ejecuta SIEMPRE después de un upload_queue.get(), haya error o no.
+            if task_id:
+                # Limpiar operaciones activas
+                active_operations.pop(task_id, None)
+                
+            # LLAMAR task_done() EXACTAMENTE UNA VEZ por cada upload_queue.get()
+            try:
+                upload_queue.task_done()
+                logger.debug(f"task_done() llamado para tarea {task_id}")
+            except ValueError as ve:
+                # Capturar específicamente el error de task_done() ya llamado
+                logger.error(f"Error al llamar task_done() para tarea {task_id}: {ve}")
+            except Exception as e:
+                # Capturar cualquier otro error inesperado en task_done()
+                logger.error(f"Error inesperado al llamar task_done() para tarea {task_id}: {e}")
+
 
 # --- Manejadores de Pyrogram ---
 @app_telegram.on_message(filters.command("start"))
@@ -566,7 +577,7 @@ async def ver_nube_command(client: Client, message: Message):
     else:
         await status_message.edit_text(response_text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
 
-# --- MODIFICADO: handle_video con actualización de mensaje de cola ---
+# --- CORREGIDO: handle_video con manejo de errores y almacenamiento anticipado ---
 @app_telegram.on_message(filters.video & filters.private)
 async def handle_video(client: Client, message: Message):
     user_id = message.from_user.id
@@ -596,7 +607,6 @@ async def handle_video(client: Client, message: Message):
     
     # --- CORREGIDO: Almacenar en queued_tasks primero ---
     # Almacenar la información de la tarea en queued_tasks *antes* de enviar mensajes o poner en cola
-    # Esto asegura que si process_upload_queue la toma, la encontrará.
     queued_tasks[task_id] = {
         'user_id': user_id,
         'message_id': message.id,
@@ -621,15 +631,13 @@ async def handle_video(client: Client, message: Message):
     except Exception as e:
         logger.error(f"Error enviando mensaje de cola al usuario {user_id} para tarea {task_id}: {e}")
         # Si falla al enviar el mensaje, eliminar la tarea de queued_tasks
-        # para que process_upload_queue la descarte correctamente.
         queued_tasks.pop(task_id, None)
-        # NOTA: La tarea sigue en upload_queue, pero process_upload_queue la ignorará.
-        # Para una solución más robusta, se necesitaría una cola que permita eliminación por valor,
-        # o un mecanismo más complejo. Esta es una solución razonable para el error actual.
+        # NOTA: La tarea sigue en upload_queue, pero process_upload_queue la descartará.
         await message.reply_text("⚠️ Hubo un error al notificarte sobre tu posición en la cola. El video se procesará igualmente si es posible.")
     # --- FIN MODIFICADO ---
 
     logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición: {new_position}")
+
 
 @app_telegram.on_callback_query()
 async def on_callback_query(client: Client, callback_query: CallbackQuery):
@@ -666,8 +674,6 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
             if cancelled_queue_msg_id:
                 try:
                     await client.edit_message_text(cancelled_chat_id, cancelled_queue_msg_id, "❌ Operación cancelada mientras estaba en cola.", parse_mode=enums.ParseMode.MARKDOWN)
-                    # Opcionalmente, podrías borrar el mensaje:
-                    # await client.delete_messages(cancelled_chat_id, cancelled_queue_msg_id)
                 except Exception as e:
                     logger.warning(f"Error editando/borrando mensaje de cola cancelada: {e}")
             
@@ -676,7 +682,6 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
             return
             
         elif identifier in active_operations:
-            # ... (resto del código para cancelar operaciones activas, sin cambios) ...
             task_id_to_cancel = identifier
             operation = active_operations[task_id_to_cancel]
             if operation['user_id'] != user_id and user_id != ADMIN_TELEGRAM_ID:
@@ -954,7 +959,10 @@ if __name__ == "__main__":
         logger.info("Procesador de cola iniciado.")
 
     async def run_quart():
-        await app_quart.run_task(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+        # --- CORREGIDO: Asegurar el binding al puerto correcto ---
+        port = int(os.environ.get("PORT", 10000))
+        logger.info(f"Iniciando servidor Quart en 0.0.0.0:{port}")
+        await app_quart.run_task(host="0.0.0.0", port=port)
 
     loop = asyncio.get_event_loop()
     bot_task = loop.create_task(run_bot())
