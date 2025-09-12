@@ -178,7 +178,10 @@ def list_drive_videos(user_id):
             drive_name = item.get('name', 'Sin_nombre')
             if drive_name.startswith("video_") and '_' in drive_name:
                 parts = drive_name.split('_', 2)
-                display_name = parts[2] if len(parts) == 3 else drive_name
+                if len(parts) == 3:
+                    display_name = parts[2]
+                else:
+                    display_name = drive_name
             else:
                  display_name = drive_name
             item['display_name'] = display_name
@@ -485,7 +488,8 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if not creds_ # <-- Corrección aquí
+        # CORRECCIÓN AQUÍ
+        if not creds_: # <-- Corrección aquí
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
         try:
@@ -530,7 +534,8 @@ async def drive_login_command(client: Client, message: Message):
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_ # <-- Corrección aquí
+    # CORRECCIÓN AQUÍ
+    if not creds_: # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
             try:
@@ -628,7 +633,7 @@ async def handle_user_email(client: Client, message: Message):
     if "@" in text and "." in text and " " not in text:
         email = text
         pending_emails[user_id] = email
-        
+
         # --- Almacenar información del usuario ---
         user_mention = message.from_user.username
         user_display = f"@{user_mention}" if user_mention else "Sin @username"
@@ -664,7 +669,7 @@ async def handle_user_email(client: Client, message: Message):
 @app_telegram.on_message(filters.command("aprobar_usuario") & filters.private)
 async def approve_user_command(client: Client, message: Message):
     logger.info(f"✅ /aprobar_usuario recibido de {message.from_user.id}")
-    
+
     if message.from_user.id != ADMIN_TELEGRAM_ID:
         logger.warning(f"❌ Acceso denegado a /aprobar_usuario para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
         await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
@@ -794,7 +799,7 @@ async def list_approved_users_command(client: Client, message: Message):
         info = user_info.get(user_id, {})
         name = info.get('name', 'Desconocido')
         username = info.get('username', 'Sin @')
-        
+
         response_text += f"- **{name}** ({username}) - `{user_id}`\n"
 
     await message.reply_text(response_text, parse_mode=enums.ParseMode.MARKDOWN)
@@ -819,7 +824,8 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_ # <-- Corrección aquí
+    # CORRECCIÓN AQUÍ
+    if not creds_: # <-- Corrección aquí
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
 
     try:
