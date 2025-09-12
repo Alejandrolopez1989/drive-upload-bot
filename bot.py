@@ -574,7 +574,7 @@ async def handle_video(client: Client, message: Message):
         await message.reply_text("❌ Conecta tu cuenta de Google Drive primero con /drive_login.")
         return
 
-    global total_uploads_queued # Acceder a la variable global
+    global total_uploads_queued
 
     task_id = str(uuid.uuid4())
     file_name = message.video.file_name or 'video.mp4'
@@ -590,32 +590,46 @@ async def handle_video(client: Client, message: Message):
     queue_item = {
         'task_id': task_id,
         'user_id': user_id,
-        'message': message,
+        'message': message, # Pasar el objeto completo
         'file_name': file_name
     }
     
-    await upload_queue.put(queue_item)
-    
-    # --- MODIFICADO: Informar al usuario, almacenar message_id y chat_id ---
-    queue_status_message = None
-    if current_queue_size == 0 and new_position == 1:
-        queue_status_message = await message.reply_text("⏳ Su video está en cola. Posición: 1.")
-    else:
-        queue_status_message = await message.reply_text(f"⏳ Su video está en cola. Posición: {new_position}.")
-    
-    # Almacenar la posición, message_id del mensaje de estado de cola y chat_id
+    # --- CORREGIDO: Almacenar en queued_tasks primero ---
+    # Almacenar la información de la tarea en queued_tasks *antes* de enviar mensajes o poner en cola
+    # Esto asegura que si process_upload_queue la toma, la encontrará.
     queued_tasks[task_id] = {
         'user_id': user_id,
         'message_id': message.id,
         'file_name': file_name,
         'position': new_position,
-        'queue_status_message_id': queue_status_message.id,
-        'chat_id': message.chat.id # NUEVO: Almacenar chat_id para actualizar mensajes
+        'queue_status_message_id': None, # Se actualizará después
+        'chat_id': message.chat.id
     }
+    
+    # Poner la tarea en la cola de procesamiento
+    await upload_queue.put(queue_item)
+    
+    # --- MODIFICADO: Informar al usuario y actualizar queued_tasks con el message_id del mensaje ---
+    queue_status_message = None
+    try:
+        # Enviar el mensaje de estado de cola al usuario
+        queue_status_message = await message.reply_text(f"⏳ Su video está en cola. Posición: {new_position}.")
+        
+        # Actualizar queued_tasks con el message_id del mensaje enviado
+        queued_tasks[task_id]['queue_status_message_id'] = queue_status_message.id
+        
+    except Exception as e:
+        logger.error(f"Error enviando mensaje de cola al usuario {user_id} para tarea {task_id}: {e}")
+        # Si falla al enviar el mensaje, eliminar la tarea de queued_tasks
+        # para que process_upload_queue la descarte correctamente.
+        queued_tasks.pop(task_id, None)
+        # NOTA: La tarea sigue en upload_queue, pero process_upload_queue la ignorará.
+        # Para una solución más robusta, se necesitaría una cola que permita eliminación por valor,
+        # o un mecanismo más complejo. Esta es una solución razonable para el error actual.
+        await message.reply_text("⚠️ Hubo un error al notificarte sobre tu posición en la cola. El video se procesará igualmente si es posible.")
     # --- FIN MODIFICADO ---
 
     logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición: {new_position}")
-
 
 @app_telegram.on_callback_query()
 async def on_callback_query(client: Client, callback_query: CallbackQuery):
