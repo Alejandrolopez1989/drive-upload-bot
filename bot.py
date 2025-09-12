@@ -229,6 +229,8 @@ async def set_bot_commands(client: Client):
 # --- Función para actualizar mensajes de usuarios en cola ---
 async def update_queue_messages(client: Client):
     """Actualiza los mensajes de estado para todos los usuarios en la cola."""
+    # Declaración global al inicio de la función
+    global upload_queue
     temp_queue = deque()
     while upload_queue:
         user_id, orig_msg = upload_queue.popleft()
@@ -243,12 +245,12 @@ async def update_queue_messages(client: Client):
             logger.warning(f"No se pudo actualizar mensaje de cola para {user_id}: {e}")
         temp_queue.append((user_id, orig_msg))
     # Restaurar la cola
-    global upload_queue
     upload_queue = temp_queue
 
 # --- Función para procesar la cola ---
 async def process_queue(client: Client):
     """Toma el primer elemento de la cola y lo procesa."""
+    global active_operations
     if active_operations:
         return # Si ya hay una operación activa, no procesamos
 
@@ -269,8 +271,10 @@ async def handle_video(client: Client, message: Message):
         return
 
     # --- Sistema de Cola ---
+    global active_operations
     if active_operations:
         # Si hay una operación activa, añadir a la cola
+        global upload_queue
         position = len(upload_queue) + 1
         upload_queue.append((user_id, message))
         # Editar el mensaje del usuario para mostrar que está en cola
@@ -311,6 +315,7 @@ async def handle_video_from_queue(client: Client, original_message: Message):
     try:
         cancel_flag = asyncio.Event()
         # Registrar la operación activa con el mensaje original
+        global active_operations
         active_operations[user_id] = {
             'task': asyncio.current_task(),
             'file_path': None,
@@ -480,6 +485,7 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("❌ No puedes cancelar la operación de otro usuario.", show_alert=True)
             return
 
+        global active_operations
         if user_id in active_operations:
             operation = active_operations[user_id]
             operation['cancel_flag'].set()
@@ -513,7 +519,6 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        # CORRECCIÓN AQUÍ: Reemplazar creds_ por creds_data y agregar :
         if not creds_data: # <-- Corrección aquí
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
@@ -559,7 +564,6 @@ async def drive_login_command(client: Client, message: Message):
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    # CORRECCIÓN AQUÍ: Reemplazar creds_ por creds_data y agregar :
     if not creds_data: # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
@@ -844,7 +848,6 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    # CORRECCIÓN AQUÍ: Reemplazar creds_ por creds_data y agregar :
     if not creds_data: # <-- Corrección aquí
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
 
