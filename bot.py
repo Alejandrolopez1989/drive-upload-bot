@@ -49,7 +49,7 @@ user_info = {} # {user_id: {'name': '...', 'username': '...'}}
 
 # --- NUEVO: Sistema de Cola Mejorado ---
 upload_queue = asyncio.Queue()
-queued_tasks = {} # {task_id: {'user_id': ..., 'message_id': ..., 'file_name': ..., 'position': ...}}
+queued_tasks = {} # {task_id: {'user_id': ..., 'message_id': ..., 'file_name': ..., 'position': ..., 'queue_status_message_id': ..., 'chat_id': ...}}
 total_uploads_queued = 0 # Contador global de uploads encolados
 
 logging.basicConfig(level=logging.INFO)
@@ -213,10 +213,28 @@ async def update_status_message(client: Client, chat_id: int, message_id: int, t
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"Error actualizando mensaje: {e}")
 
-# --- NUEVA: Función para procesar la cola de subidas ---
+# --- NUEVA: Función para actualizar el mensaje de estado de cola ---
+async def update_queue_status_message(client: Client, user_id: int, chat_id: int, message_id: int, position: int):
+    """
+    Edita el mensaje que indica la posición en la cola para un usuario.
+    """
+    try:
+        if position <= 0:
+            # Si la posición es 0 o negativa, probablemente esté siendo procesado o cancelado
+            if position == 0:
+                 await client.edit_message_text(chat_id, message_id, "⏳ Su video está próximo a ser procesado.", parse_mode=enums.ParseMode.MARKDOWN)
+        else:
+            await client.edit_message_text(chat_id, message_id, f"⏳ Su video está en cola. Posición: {position}.", parse_mode=enums.ParseMode.MARKDOWN)
+    except Exception as e:
+        # Es común que falle si el mensaje ya fue editado o borrado
+        if "MESSAGE_NOT_MODIFIED" not in str(e) and "Message to edit not found" not in str(e):
+            logger.warning(f"Error actualizando mensaje de cola para user {user_id}, msg_id {message_id}: {e}")
+        # No es crítico si falla la actualización del mensaje
+
+# --- MODIFICADO: Función para procesar la cola de subidas con actualización de mensajes ---
 async def process_upload_queue(client: Client):
     """Función asíncrona continua que procesa videos de la cola."""
-    global total_uploads_queued # Acceder a la variable global
+    global total_uploads_queued
     while True:
         try:
             queue_item = await upload_queue.get()
@@ -234,20 +252,28 @@ async def process_upload_queue(client: Client):
             logger.info(f"Iniciando procesamiento de video en cola para user {user_id}, tarea {task_id}")
 
             # Mover la tarea de 'en cola' a 'activa'
-            queued_tasks.pop(task_id, None)
+            task_info = queued_tasks.pop(task_id, None) # Obtener info antes de eliminarla
+            chat_id_for_updates = message.chat.id
             
-            # --- NUEVO: Actualizar posiciones de las tareas restantes en cola ---
-            # Decrementar el contador global
+            # --- MODIFICADO: Actualizar posiciones y mensajes de las tareas restantes en cola ---
             total_uploads_queued -= 1
-            # Actualizar la posición almacenada de las tareas restantes en queued_tasks
-            tasks_to_update = list(queued_tasks.keys()) # Crear una lista para evitar errores de modificación durante la iteración
+            tasks_to_update = list(queued_tasks.keys())
             for tid in tasks_to_update:
-                 if tid in queued_tasks: # Verificar nuevamente dentro del bucle
+                 if tid in queued_tasks:
                     old_pos = queued_tasks[tid].get('position', 0)
                     if old_pos > 0:
-                        queued_tasks[tid]['position'] = old_pos - 1
-            # --- FIN NUEVO ---
+                        new_pos = old_pos - 1
+                        queued_tasks[tid]['position'] = new_pos
+                        
+                        # --- NUEVO: Actualizar mensaje del usuario ---
+                        queue_msg_id = queued_tasks[tid].get('queue_status_message_id')
+                        target_user_id = queued_tasks[tid].get('user_id')
+                        if queue_msg_id and target_user_id:
+                            task_chat_id = queued_tasks[tid].get('chat_id', target_user_id)
+                            asyncio.create_task(update_queue_status_message(client, target_user_id, task_chat_id, queue_msg_id, new_pos))
+            # --- FIN MODIFICADO ---
 
+            # ... (resto de la lógica de procesamiento, sin cambios) ...
             if not is_user_authenticated(user_id):
                  await message.reply_text("❌ Tu cuenta de Google Drive ya no está conectada. Por favor, vuelve a autenticarte con /drive_login.")
                  upload_queue.task_done()
@@ -262,12 +288,10 @@ async def process_upload_queue(client: Client):
             # --- Lógica de descarga y subida (extraída de handle_video) ---
             try:
                 cancel_flag = asyncio.Event()
-                # Usar task_id para cancelar
                 cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{task_id}")]]
                 reply_markup = InlineKeyboardMarkup(cancel_button)
                 status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
                 status_message_id = status_message.id
-                # Registrar como operación activa usando task_id
                 active_operations[task_id] = {
                     'task': asyncio.current_task(),
                     'file_path': None,
@@ -424,7 +448,7 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        # --- CORREGIDO: 'creds_' -> 'creds_data' ---
+        # --- CORREGIDO: 'creds_data' ---
         if not creds_data:
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
@@ -470,7 +494,7 @@ async def drive_login_command(client: Client, message: Message):
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    # --- CORREGIDO: 'creds_' -> 'creds_data' ---
+    # --- CORREGIDO: 'creds_data' ---
     if not creds_data:
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
@@ -536,7 +560,7 @@ async def ver_nube_command(client: Client, message: Message):
     else:
         await status_message.edit_text(response_text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
 
-# --- MODIFICADO: handle_video con lógica de cola corregida ---
+# --- MODIFICADO: handle_video con actualización de mensaje de cola ---
 @app_telegram.on_message(filters.video & filters.private)
 async def handle_video(client: Client, message: Message):
     user_id = message.from_user.id
@@ -550,8 +574,6 @@ async def handle_video(client: Client, message: Message):
     file_name = message.video.file_name or 'video.mp4'
     
     # --- NUEVO: Calcular posición antes de incrementar el contador ---
-    # La posición del nuevo elemento es el número total de elementos en cola + 1
-    # (ya que el elemento aún no se ha agregado)
     current_queue_size = upload_queue.qsize()
     new_position = current_queue_size + 1 # Posición 1-indexed
     
@@ -568,29 +590,23 @@ async def handle_video(client: Client, message: Message):
     
     await upload_queue.put(queue_item)
     
-    # --- NUEVO: Almacenar la posición en queued_tasks ---
+    # --- MODIFICADO: Informar al usuario, almacenar message_id y chat_id ---
+    queue_status_message = None
+    if current_queue_size == 0 and new_position == 1:
+        queue_status_message = await message.reply_text("⏳ Su video está en cola. Posición: 1.")
+    else:
+        queue_status_message = await message.reply_text(f"⏳ Su video está en cola. Posición: {new_position}.")
+    
+    # Almacenar la posición, message_id del mensaje de estado de cola y chat_id
     queued_tasks[task_id] = {
         'user_id': user_id,
         'message_id': message.id,
         'file_name': file_name,
-        'position': new_position # Almacenar la posición calculada
+        'position': new_position,
+        'queue_status_message_id': queue_status_message.id,
+        'chat_id': message.chat.id # NUEVO: Almacenar chat_id para actualizar mensajes
     }
-    # --- FIN NUEVO ---
-    
-    # --- NUEVO: Informar al usuario con la posición correcta ---
-    # Si hay 0 elementos en la cola, significa que este es el único, y se está procesando.
-    # Si hay > 0 elementos en la cola, este está esperando.
-    if current_queue_size == 0 and new_position == 1:
-        # Caso especial: si no hay otros en cola, este podría ser el que se está procesando.
-        # Pero como acabamos de ponerlo, y process_upload_queue lo toma uno por uno,
-        # si la cola estaba vacía, este será el próximo en procesarse.
-        # Mejor: simplemente decirle que está en la posición 1.
-        await message.reply_text("⏳ Su video está en cola. Posición: 1.")
-    else:
-        # Hay otros en cola, o este es el primero pero hay uno procesándose.
-        # La posición calculada es correcta.
-        await message.reply_text(f"⏳ Su video está en cola. Posición: {new_position}.")
-    # --- FIN NUEVO ---
+    # --- FIN MODIFICADO ---
 
     logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición: {new_position}")
 
@@ -605,23 +621,42 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
         
         if identifier in queued_tasks:
             task_info = queued_tasks.pop(identifier)
-            # --- NUEVO: Actualizar posiciones al cancelar ---
             global total_uploads_queued
             total_uploads_queued -= 1
             cancelled_position = task_info.get('position', 0)
+            cancelled_chat_id = task_info.get('chat_id', user_id) # Obtener chat_id
+            cancelled_queue_msg_id = task_info.get('queue_status_message_id') # Obtener message_id del mensaje de cola
+            
             if cancelled_position > 0:
                  tasks_to_update = list(queued_tasks.keys())
                  for tid in tasks_to_update:
                      if tid in queued_tasks:
                         old_pos = queued_tasks[tid].get('position', 0)
-                        if old_pos > cancelled_position: # Solo actualizar tareas que estaban detrás
+                        if old_pos > cancelled_position:
                             queued_tasks[tid]['position'] = old_pos - 1
-            # --- FIN NUEVO ---
+                            # --- NUEVO: Actualizar mensaje del usuario al cancelar ---
+                            queue_msg_id = queued_tasks[tid].get('queue_status_message_id')
+                            target_user_id = queued_tasks[tid].get('user_id')
+                            task_chat_id = queued_tasks[tid].get('chat_id', target_user_id)
+                            if queue_msg_id and target_user_id:
+                                asyncio.create_task(update_queue_status_message(client, target_user_id, task_chat_id, queue_msg_id, old_pos - 1))
+                            # --- FIN NUEVO ---
+            
+            # Eliminar el mensaje de "en cola" del usuario cancelado o informarle
+            if cancelled_queue_msg_id:
+                try:
+                    await client.edit_message_text(cancelled_chat_id, cancelled_queue_msg_id, "❌ Operación cancelada mientras estaba en cola.", parse_mode=enums.ParseMode.MARKDOWN)
+                    # Opcionalmente, podrías borrar el mensaje:
+                    # await client.delete_messages(cancelled_chat_id, cancelled_queue_msg_id)
+                except Exception as e:
+                    logger.warning(f"Error editando/borrando mensaje de cola cancelada: {e}")
+            
             logger.info(f"Tarea en cola {identifier} cancelada por el usuario {user_id}")
             await callback_query.answer("Operación cancelada mientras estaba en cola.", show_alert=True)
             return
             
         elif identifier in active_operations:
+            # ... (resto del código para cancelar operaciones activas, sin cambios) ...
             task_id_to_cancel = identifier
             operation = active_operations[task_id_to_cancel]
             if operation['user_id'] != user_id and user_id != ADMIN_TELEGRAM_ID:
@@ -859,7 +894,7 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    # --- CORREGIDO: 'creds_' -> 'creds_data' ---
+    # --- CORREGIDO: 'creds_data' ---
     if not creds_data:
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
 
