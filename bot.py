@@ -34,7 +34,7 @@ ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "telegramprueba30@gmail.com")
 
 # --- CONFIGURACIÓN DE GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
-RENDER_REDIRECT_URI = os.environ.get("RENDER_REDIRECT_URI", "https://google-drive-vip.onrender.com/oauth2callback")
+RENDER_REDIRECT_URI = "https://google-drive-vip.onrender.com/oauth2callback")
 
 # --- Inicialización ---
 app_quart = Quart(__name__)
