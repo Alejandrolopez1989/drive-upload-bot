@@ -605,6 +605,7 @@ async def ver_nube_command(client: Client, message: Message):
 async def handle_video(client: Client, message: Message):
     user_id = message.from_user.id
     if not is_user_authenticated(user_id):
+        # Responder directamente al video con error
         await message.reply_text("❌ Conecta tu cuenta de Google Drive primero con /drive_login.")
         return
 
@@ -617,9 +618,6 @@ async def handle_video(client: Client, message: Message):
     # Considerar tanto videos en cola como videos activos (en proceso)
     current_queue_size = upload_queue.qsize()
     current_active_size = len(active_operations)
-    # La posición es la suma de videos en cola + videos activos + 1 (el nuevo)
-    # Pero para mostrar el mensaje de cola, solo necesitamos saber si hay alguno antes.
-    # videos_before_this = current_queue_size + current_active_size
     new_position = current_queue_size + current_active_size + 1 # Posición 1-indexed
     
     # Incrementar el contador global
@@ -645,22 +643,29 @@ async def handle_video(client: Client, message: Message):
     # Poner la tarea en la cola de procesamiento
     await upload_queue.put(queue_item)
     
-    # --- MODIFICADO: Considerar videos activos para mostrar mensaje de cola ---
+    # --- MODIFICADO: Responder al video y considerar videos activos ---
     queue_status_message = None
     # Mostrar mensaje de cola si hay videos en cola O videos activos (en proceso)
-    # Esto asegura que el segundo video también reciba un mensaje de cola si el primero se está procesando.
     if (current_queue_size + current_active_size) > 0: 
         try:
-            # Enviar el mensaje de estado de cola al usuario
-            queue_status_message = await message.reply_text(f"⏳ Su video está en cola. Posición: {new_position}.")
+            # --- MODIFICADO: Usar reply_to_message_id para responder al video ---
+            # Enviar el mensaje de estado de cola como respuesta al mensaje de video
+            queue_status_message = await message.reply_text(
+                f"⏳ Su video está en cola. Posición: {new_position}.",
+                reply_to_message_id=message.id # <-- Responder al video
+            )
             # Actualizar queued_tasks con el message_id del mensaje enviado
             queued_tasks[task_id]['queue_status_message_id'] = queue_status_message.id
         except Exception as e:
             logger.error(f"Error enviando mensaje de cola al usuario {user_id} para tarea {task_id}: {e}")
-            # Si falla, el video sigue en la cola y se procesará, pero sin mensaje de posición.
-            await message.reply_text("⚠️ Hubo un error al notificarte sobre tu posición en la cola. El video se procesará igualmente.")
+            # Si falla, intentar enviar un mensaje normal (no como respuesta)
+            try:
+                fallback_message = await message.reply_text("⚠️ Hubo un error al notificarte sobre tu posición en la cola. El video se procesará igualmente.")
+                # Opcionalmente, podríamos almacenar este fallback_message.id también
+            except:
+                pass # Ignorar errores al enviar mensaje de fallback
     # Si no hay videos en cola ni activos, no se envía mensaje de cola.
-    # El mensaje "Descargando..." vendrá del process_upload_queue y se creará nuevo.
+    # El mensaje "Descargando..." vendrá del process_upload_queue y se creará nuevo (o editará el de cola).
 
     logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición: {new_position}.")
 
