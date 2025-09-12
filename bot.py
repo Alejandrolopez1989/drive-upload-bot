@@ -301,27 +301,37 @@ async def process_upload_queue(client: Client):
                 # Si existe un mensaje de cola, lo editamos para mostrar "Descargando..."
                 try:
                     await client.edit_message_text(
-                        message.chat.id, 
-                        queue_status_message_id, 
-                        "📥 Descargando el video... 0%", 
+                        chat_id=message.chat.id, 
+                        message_id=queue_status_message_id, 
+                        text="📥 Descargando el video... 0%", 
                         reply_markup=reply_markup
                     )
                     status_message_id = queue_status_message_id # Reutilizamos el ID del mensaje de cola
                 except Exception as e:
                     logger.warning(f"No se pudo editar el mensaje de cola {queue_status_message_id} para la tarea {task_id}: {e}")
-                    # Si falla la edición, crear un nuevo mensaje como respuesta al video
-                    status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
+                    # Si falla la edición, crear un nuevo mensaje como respuesta al video (explícito)
+                    status_message = await client.send_message(
+                        chat_id=message.chat.id,
+                        text="📥 Descargando el video... 0%",
+                        reply_markup=reply_markup,
+                        reply_to_message_id=message.id # <-- EXPLÍCITO
+                    )
                     status_message_id = status_message.id
             else:
-                # Si no hay mensaje de cola (primer video), crear un nuevo mensaje como respuesta al video
-                status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
+                # Si no hay mensaje de cola (primer video), crear un nuevo mensaje como respuesta al video (explícito)
+                status_message = await client.send_message(
+                    chat_id=message.chat.id,
+                    text="📥 Descargando el video... 0%",
+                    reply_markup=reply_markup,
+                    reply_to_message_id=message.id # <-- EXPLÍCITO
+                )
                 status_message_id = status_message.id
             
             # Almacenar el message_id (ya sea del mensaje editado o del nuevo) en active_operations
             active_operations[task_id] = {
                 'task': asyncio.current_task(),
                 'file_path': None,
-                'status_message_id': status_message_id, # <-- ID del mensaje reutilizado o nuevo
+                'status_message_id': status_message_id,
                 'cancel_flag': cancel_flag,
                 'user_id': user_id,
                 'message': message
