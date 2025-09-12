@@ -614,8 +614,13 @@ async def handle_video(client: Client, message: Message):
     file_name = message.video.file_name or 'video.mp4'
     
     # --- Calcular posición ---
+    # Considerar tanto videos en cola como videos activos (en proceso)
     current_queue_size = upload_queue.qsize()
-    new_position = current_queue_size + 1 # Posición 1-indexed
+    current_active_size = len(active_operations)
+    # La posición es la suma de videos en cola + videos activos + 1 (el nuevo)
+    # Pero para mostrar el mensaje de cola, solo necesitamos saber si hay alguno antes.
+    # videos_before_this = current_queue_size + current_active_size
+    new_position = current_queue_size + current_active_size + 1 # Posición 1-indexed
     
     # Incrementar el contador global
     total_uploads_queued += 1
@@ -640,12 +645,11 @@ async def handle_video(client: Client, message: Message):
     # Poner la tarea en la cola de procesamiento
     await upload_queue.put(queue_item)
     
-    # --- MODIFICADO: Solo enviar mensaje de cola si hay otros en cola ---
+    # --- MODIFICADO: Considerar videos activos para mostrar mensaje de cola ---
     queue_status_message = None
-    # Si la cola estaba vacía (current_queue_size == 0), no enviamos mensaje de cola.
-    # El primer video se procesará inmediatamente o muy pronto.
-    # Solo si hay al menos uno ya en cola (current_queue_size > 0), mostramos posición.
-    if current_queue_size > 0: 
+    # Mostrar mensaje de cola si hay videos en cola O videos activos (en proceso)
+    # Esto asegura que el segundo video también reciba un mensaje de cola si el primero se está procesando.
+    if (current_queue_size + current_active_size) > 0: 
         try:
             # Enviar el mensaje de estado de cola al usuario
             queue_status_message = await message.reply_text(f"⏳ Su video está en cola. Posición: {new_position}.")
@@ -654,11 +658,9 @@ async def handle_video(client: Client, message: Message):
         except Exception as e:
             logger.error(f"Error enviando mensaje de cola al usuario {user_id} para tarea {task_id}: {e}")
             # Si falla, el video sigue en la cola y se procesará, pero sin mensaje de posición.
-            # No eliminamos de queued_tasks como antes, solo no guardamos el message_id.
             await message.reply_text("⚠️ Hubo un error al notificarte sobre tu posición en la cola. El video se procesará igualmente.")
-    
-    # Si current_queue_size == 0, no se envía mensaje de cola.
-    # El mensaje "Descargando..." vendrá del process_upload_queue.
+    # Si no hay videos en cola ni activos, no se envía mensaje de cola.
+    # El mensaje "Descargando..." vendrá del process_upload_queue y se creará nuevo.
 
     logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición: {new_position}.")
 
