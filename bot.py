@@ -290,15 +290,38 @@ async def process_upload_queue(client: Client):
                 continue
 
             # Descarga y subida
+            queue_status_message_id = task_info.get('queue_status_message_id')
+            
             cancel_flag = asyncio.Event()
             cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{task_id}")]]
             reply_markup = InlineKeyboardMarkup(cancel_button)
-            status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
-            status_message_id = status_message.id
+            
+            status_message_id = None
+            if queue_status_message_id:
+                # Si existe un mensaje de cola, lo editamos para mostrar "Descargando..."
+                try:
+                    await client.edit_message_text(
+                        message.chat.id, 
+                        queue_status_message_id, 
+                        "📥 Descargando el video... 0%", 
+                        reply_markup=reply_markup
+                    )
+                    status_message_id = queue_status_message_id # Reutilizamos el ID del mensaje de cola
+                except Exception as e:
+                    logger.warning(f"No se pudo editar el mensaje de cola {queue_status_message_id} para la tarea {task_id}: {e}")
+                    # Si falla la edición, enviar un nuevo mensaje (fallback)
+                    status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
+                    status_message_id = status_message.id
+            else:
+                # Si no hay mensaje de cola (primer video sin mensaje), enviar uno nuevo
+                status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
+                status_message_id = status_message.id
+            
+            # Almacenar el message_id (ya sea del mensaje editado o del nuevo) en active_operations
             active_operations[task_id] = {
                 'task': asyncio.current_task(),
                 'file_path': None,
-                'status_message_id': status_message_id,
+                'status_message_id': status_message_id, # <-- ID del mensaje reutilizado o nuevo
                 'cancel_flag': cancel_flag,
                 'user_id': user_id,
                 'message': message
