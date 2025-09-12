@@ -309,11 +309,11 @@ async def process_upload_queue(client: Client):
                     status_message_id = queue_status_message_id # Reutilizamos el ID del mensaje de cola
                 except Exception as e:
                     logger.warning(f"No se pudo editar el mensaje de cola {queue_status_message_id} para la tarea {task_id}: {e}")
-                    # Si falla la edición, enviar un nuevo mensaje (fallback)
+                    # Si falla la edición, crear un nuevo mensaje como respuesta al video
                     status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
                     status_message_id = status_message.id
             else:
-                # Si no hay mensaje de cola (primer video sin mensaje), enviar uno nuevo
+                # Si no hay mensaje de cola (primer video), crear un nuevo mensaje como respuesta al video
                 status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
                 status_message_id = status_message.id
             
