@@ -9,7 +9,6 @@ import mimetypes
 import aiofiles
 import secrets
 import uuid
-from collections import deque
 from quart import Quart, request, redirect, url_for
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, CallbackQuery
@@ -34,7 +33,7 @@ ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "telegramprueba30@gmail.com")
 
 # --- CONFIGURACIÓN DE GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
-RENDER_REDIRECT_URI = "https://google-drive-vip.onrender.com/oauth2callback")
+RENDER_REDIRECT_URI = os.environ.get("RENDER_REDIRECT_URI", "https://google-drive-vip.onrender.com/oauth2callback")
 
 # --- Inicialización ---
 app_quart = Quart(__name__)
@@ -57,7 +56,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Funciones auxiliares para Google Drive ---
-# ... (Sin cambios en estas funciones, copia tu código original aquí) ...
 def is_user_authenticated(user_id):
     creds = user_credentials.get(user_id)
     if not creds:
@@ -94,8 +92,8 @@ def get_user_drive_service(user_id):
         user_credentials.pop(user_id, None)
         return None
 
+# --- Clase para subida con progreso ---
 class ProgressMediaUpload(MediaIoBaseUpload):
-    # ... (Sin cambios en esta clase, copia tu código original aquí) ...
     def __init__(self, filename, mimetype=None, chunksize=1024 * 1024, resumable=False, callback=None, cancel_flag=None):
         self._filename = filename
         self._file_handle = open(filename, 'rb')
@@ -135,7 +133,6 @@ class ProgressMediaUpload(MediaIoBaseUpload):
             self._file_handle.close()
 
 async def upload_to_drive_with_progress(user_id, file_path, file_name, progress_callback, cancel_flag):
-    # ... (Sin cambios en esta función, copia tu código original aquí) ...
     service = get_user_drive_service(user_id)
     if not service:
         return None
@@ -165,7 +162,6 @@ def get_file_url(file_id):
     return f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
 
 def list_drive_videos(user_id):
-    # ... (Sin cambios en esta función, copia tu código original aquí) ...
     service = get_user_drive_service(user_id)
     if not service:
         return []
@@ -194,7 +190,6 @@ def list_drive_videos(user_id):
         return []
 
 def delete_from_drive(file_id, user_id):
-    # ... (Sin cambios en esta función, copia tu código original aquí) ...
     service = get_user_drive_service(user_id)
     if not service:
         return False
@@ -207,7 +202,6 @@ def delete_from_drive(file_id, user_id):
 
 # --- Función auxiliar para actualizar mensajes de estado ---
 async def update_status_message(client: Client, chat_id: int, message_id: int, text: str, user_id: int, remove_buttons: bool = False):
-    # ... (Sin cambios en esta función, copia tu código original aquí) ...
     try:
         if remove_buttons:
             await client.edit_message_text(chat_id, message_id, text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
@@ -388,7 +382,6 @@ async def process_upload_queue(client: Client):
 
 # --- Manejadores de Pyrogram ---
 @app_telegram.on_message(filters.command("start"))
-# ... (Sin cambios en este manejador, copia tu código original aquí) ...
 async def start_command(client: Client, message: Message):
     welcome_text = (
         "¡Hola! 👋\n\n"
@@ -401,7 +394,6 @@ async def start_command(client: Client, message: Message):
     await message.reply_text(welcome_text)
 
 async def set_bot_commands(client: Client):
-    # ... (Sin cambios en este manejador, copia tu código original aquí) ...
     commands = [
         BotCommand("start", "Mostrar mensaje de inicio"),
         BotCommand("drive_login", "Conectar tu cuenta de Google Drive"),
@@ -416,7 +408,6 @@ async def set_bot_commands(client: Client):
         logger.error(f"Error estableciendo comandos: {e}")
 
 @app_telegram.on_message(filters.command("drive_login"))
-# ... (Sin cambios en este manejador, copia tu código original aquí) ...
 async def drive_login_command(client: Client, message: Message):
     user_id = message.from_user.id
     user_name = message.from_user.first_name or message.from_user.username or "Usuario"
@@ -433,6 +424,7 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        # --- CORREGIDO: 'creds_' -> 'creds_data' ---
         if not creds_data:
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
@@ -478,6 +470,7 @@ async def drive_login_command(client: Client, message: Message):
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    # --- CORREGIDO: 'creds_' -> 'creds_data' ---
     if not creds_data:
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
@@ -513,7 +506,6 @@ async def drive_login_command(client: Client, message: Message):
             os.remove('credentials_temp.json')
 
 @app_telegram.on_message(filters.command("ver_nube"))
-# ... (Sin cambios en este manejador, copia tu código original aquí) ...
 async def ver_nube_command(client: Client, message: Message):
     user_id = message.from_user.id
     if not is_user_authenticated(user_id):
@@ -602,12 +594,7 @@ async def handle_video(client: Client, message: Message):
 
     logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición: {new_position}")
 
-# ... (Los manejadores restantes como on_callback_query, delete_file, handle_user_email, 
-# approve_user_command, revoke_user_command, list_approved_users_command, oauth2callback 
-# y el Punto de Entrada se mantienen igual o con cambios menores como en la respuesta anterior.
-# Copia tu código original para estas secciones o usa el código proporcionado en la respuesta anterior) ...
 
-# --- Ejemplo de cómo podría quedar on_callback_query (solo cambios relevantes) ---
 @app_telegram.on_callback_query()
 async def on_callback_query(client: Client, callback_query: CallbackQuery):
     data = callback_query.data
@@ -651,7 +638,257 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
 
-# --- Punto de Entrada (solo cambios relevantes) ---
+@app_telegram.on_message(filters.regex(r"^/delete_([a-zA-Z0-9_-]+)$"))
+async def delete_file(client: Client, message: Message):
+    user_id = message.from_user.id
+    if not is_user_authenticated(user_id):
+        await message.reply_text("❌ Conecta tu cuenta de Google Drive primero con /drive_login.")
+        return
+    service = get_user_drive_service(user_id)
+    if not service:
+        await message.reply_text("❌ Problema de conexión con tu Drive.")
+        return
+    match = message.matches[0] if message.matches else None
+    if not match:
+        await message.reply_text("❌ Comando no válido.")
+        return
+    file_id = match.group(1)
+    status_message = await message.reply_text("🗑️ Eliminando video...")
+    if delete_from_drive(file_id, user_id):
+        await status_message.edit_text("✅ Video eliminado exitosamente de tu Google Drive.")
+    else:
+        await status_message.edit_text("❌ Error al eliminar el video de tu Google Drive.")
+
+# --- Manejador para correos de usuarios ---
+@app_telegram.on_message(filters.text & filters.private & ~filters.me & ~filters.regex(r"^/"))
+async def handle_user_email(client: Client, message: Message):
+    user_id = message.from_user.id
+    if is_user_authenticated(user_id) or user_id in approved_users:
+        return
+
+    user_name = message.from_user.first_name or message.from_user.username or "Usuario"
+    text = message.text.strip()
+
+    if "@" in text and "." in text and " " not in text:
+        email = text
+        pending_emails[user_id] = email
+        
+        user_mention = message.from_user.username
+        user_display = f"@{user_mention}" if user_mention else "Sin @username"
+        user_info[user_id] = {
+            'name': user_name,
+            'username': user_display
+        }
+
+        if ADMIN_TELEGRAM_ID:
+            try:
+                admin_msg = (
+                    f"📧 **Nuevo correo para aprobación:**\n"
+                    f"**Nombre:** {user_name}\n"
+                    f"**Usuario:** {user_display}\n"
+                    f"**ID:** `{user_id}`\n"
+                    f"**Correo:** `{email}`\n\n"
+                    f"**Acción:** Agrega el correo a 'Usuarios de prueba' en Google Cloud Console "
+                    f"y luego usa `/aprobar_usuario {user_id}`."
+                )
+                await client.send_message(ADMIN_TELEGRAM_ID, admin_msg, parse_mode=enums.ParseMode.MARKDOWN)
+                await message.reply_text("✅ Correo recibido. El administrador ha sido notificado.")
+            except Exception as e:
+                logger.error(f"Error notificando admin: {e}")
+                await message.reply_text("❌ Error al procesar tu correo.")
+        else:
+             await message.reply_text("⚠️ El administrador no ha configurado su ID.")
+    else:
+         await message.reply_text("Por favor, envíame únicamente tu correo de Google. Ej: `tu@gmail.com`", parse_mode=enums.ParseMode.MARKDOWN)
+
+# --- Comando para aprobar usuarios ---
+@app_telegram.on_message(filters.command("aprobar_usuario") & filters.private)
+async def approve_user_command(client: Client, message: Message):
+    logger.info(f"✅ /aprobar_usuario recibido de {message.from_user.id}")
+    
+    if message.from_user.id != ADMIN_TELEGRAM_ID:
+        logger.warning(f"❌ Acceso denegado a /aprobar_usuario para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
+        await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
+        return
+
+    command_parts = message.text.strip().split()
+    if len(command_parts) < 2:
+        await message.reply_text("Uso: `/aprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
+        logger.info("❌ /aprobar_usuario usado sin argumentos")
+        return
+
+    try:
+        target_user_id_str = command_parts[1]
+        if not target_user_id_str.isdigit():
+             raise ValueError("El ID de usuario debe ser un número.")
+        target_user_id = int(target_user_id_str)
+        logger.info(f"✅ user_id objetivo parseado: {target_user_id}")
+    except (ValueError, IndexError) as e:
+        logger.error(f"❌ Error parseando user_id: {e}")
+        await message.reply_text("❌ El ID de usuario debe ser un número válido.")
+        return
+    except Exception as e:
+        logger.error(f"❌ Error inesperado parseando user_id: {e}")
+        await message.reply_text("❌ Error al procesar el ID de usuario.")
+        return
+
+    try:
+        approved_users.add(target_user_id)
+        logger.info(f"✅ Usuario {target_user_id} añadido a approved_users. Total aprobados: {len(approved_users)}")
+
+        await message.reply_text(f"✅ Usuario `{target_user_id}` ha sido aprobado.", parse_mode=enums.ParseMode.MARKDOWN)
+        logger.info(f"✅ Confirmación de aprobación enviada al admin {ADMIN_TELEGRAM_ID}")
+
+        try:
+            user_msg = (
+                f"🎉 ¡Hola! El administrador ha aprobado tu solicitud.\n\n"
+                f"Ahora puedes continuar con el proceso de autenticación.\n"
+                f"Por favor, usa el comando `/drive_login` nuevamente para obtener el enlace de autenticación con Google."
+            )
+            await client.send_message(target_user_id, user_msg)
+            logger.info(f"✅ Notificación de aprobación enviada al usuario {target_user_id}")
+        except Exception as notify_e:
+            error_msg = f"⚠️ Usuario {target_user_id} aprobado, pero no se pudo notificar: {notify_e}"
+            logger.error(error_msg)
+            await message.reply_text(error_msg)
+
+    except Exception as e:
+        logger.error(f"❌ Error en lógica de aprobación para {target_user_id}: {e}", exc_info=True)
+        await message.reply_text(f"⚠️ Ocurrió un error al aprobar al usuario: {e}")
+
+# --- Comando para desaprobar (revocar) usuarios ---
+@app_telegram.on_message(filters.command("desaprobar_usuario") & filters.private)
+async def revoke_user_command(client: Client, message: Message):
+    logger.info(f"✅ /desaprobar_usuario recibido de {message.from_user.id}")
+
+    if message.from_user.id != ADMIN_TELEGRAM_ID:
+        logger.warning(f"❌ Acceso denegado a /desaprobar_usuario para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
+        await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
+        return
+
+    command_parts = message.text.strip().split()
+    if len(command_parts) < 2:
+        await message.reply_text("Uso: `/desaprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
+        logger.info("❌ /desaprobar_usuario usado sin argumentos")
+        return
+
+    try:
+        target_user_id_str = command_parts[1]
+        if not target_user_id_str.isdigit():
+             raise ValueError("El ID de usuario debe ser un número.")
+        target_user_id = int(target_user_id_str)
+        logger.info(f"✅ user_id objetivo para desaprobación: {target_user_id}")
+    except (ValueError, IndexError) as e:
+        logger.error(f"❌ Error parseando user_id para desaprobación: {e}")
+        await message.reply_text("❌ El ID de usuario debe ser un número válido.")
+        return
+    except Exception as e:
+        logger.error(f"❌ Error inesperado parseando user_id para desaprobación: {e}")
+        await message.reply_text("❌ Error al procesar el ID de usuario.")
+        return
+
+    try:
+        if target_user_id not in approved_users:
+            await message.reply_text(f"⚠️ El usuario `{target_user_id}` no está en la lista de usuarios aprobados.", parse_mode=enums.ParseMode.MARKDOWN)
+            logger.info(f"⚠️ Intento de desaprobar usuario no aprobado: {target_user_id}")
+            return
+
+        approved_users.discard(target_user_id)
+        user_info.pop(target_user_id, None)
+        logger.info(f"✅ Usuario {target_user_id} eliminado de approved_users. Total aprobados: {len(approved_users)}")
+
+        pending_email = pending_emails.pop(target_user_id, None)
+        if pending_email:
+            logger.info(f"ℹ️ Correo pendiente eliminado para {target_user_id}: {pending_email}")
+
+        user_credentials.pop(target_user_id, None)
+        logger.info(f"ℹ️ Credenciales eliminadas para {target_user_id} (si existían).")
+
+        await message.reply_text(
+            f"✅ Usuario `{target_user_id}` ha sido **desaprobado**.\n"
+            f"Ahora deberá enviar su correo nuevamente y ser aprobado para poder autenticarse.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+        logger.info(f"✅ Confirmación de desaprobación enviada al admin {ADMIN_TELEGRAM_ID}")
+
+    except Exception as e:
+        logger.error(f"❌ Error en lógica de desaprobación para {target_user_id}: {e}", exc_info=True)
+        await message.reply_text(f"⚠️ Ocurrió un error al desaprobar al usuario: {e}")
+
+# --- Comando actualizado para listar usuarios aprobados ---
+@app_telegram.on_message(filters.command("lista_aprobados") & filters.private)
+async def list_approved_users_command(client: Client, message: Message):
+    logger.info(f"✅ /lista_aprobados recibido de {message.from_user.id}")
+
+    if message.from_user.id != ADMIN_TELEGRAM_ID:
+        logger.warning(f"❌ Acceso denegado a /lista_aprobados para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
+        await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
+        return
+
+    if not approved_users:
+        await message.reply_text("ℹ️ La lista de usuarios aprobados está vacía.")
+        return
+
+    response_text = f"**Lista de usuarios aprobados ({len(approved_users)}):**\n"
+    for user_id in approved_users:
+        info = user_info.get(user_id, {})
+        name = info.get('name', 'Desconocido')
+        username = info.get('username', 'Sin @')
+        
+        response_text += f"- **{name}** ({username}) - `{user_id}`\n"
+
+    await message.reply_text(response_text, parse_mode=enums.ParseMode.MARKDOWN)
+    logger.info(f"✅ Lista de aprobados enviada al admin {ADMIN_TELEGRAM_ID}")
+
+# --- Rutas Web OAuth (Corregidas) ---
+@app_quart.route('/')
+async def index():
+    return '<h1>Bot Listo</h1><p>El bot está en funcionamiento.</p>'
+
+@app_quart.route('/oauth2callback')
+async def oauth2callback():
+    code = request.args.get('code')
+    state = request.args.get('state')
+    if not code:
+        return 'Error: No se recibió el código de autorización.', 400
+    if not state or state not in login_states:
+         return 'Error: Estado de autenticación no válido.', 400
+
+    user_id = login_states.pop(state, None)
+    if not user_id:
+        return 'Error: No se pudo asociar el código con un usuario.', 400
+
+    creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    # --- CORREGIDO: 'creds_' -> 'creds_data' ---
+    if not creds_data:
+        return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
+
+    try:
+        async with aiofiles.open('credentials_temp.json', 'w') as f:
+            await f.write(creds_data)
+        flow = Flow.from_client_secrets_file(
+            'credentials_temp.json', scopes=SCOPES,
+            redirect_uri=RENDER_REDIRECT_URI)
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        user_credentials[user_id] = creds
+        if os.path.exists('credentials_temp.json'):
+            os.remove('credentials_temp.json')
+        return """
+        <h1>¡Autenticación Exitosa!</h1>
+        <p>Tu cuenta de Google Drive ha sido conectada.</p>
+        <p>Puedes cerrar esta ventana y usar el bot en Telegram.</p>
+        <script>setTimeout(function() { window.close(); }, 3000);</script>
+        """
+    except Exception as e:
+        logger.error(f"Error en oauth2callback para {user_id}: {e}")
+        if os.path.exists('credentials_temp.json'):
+            os.remove('credentials_temp.json')
+        # --- CORREGIDO: Asegurar que se devuelve una tupla (respuesta, código) ---
+        return f'Error durante la autenticación: {e}', 500
+    # --- FIN CORREGIDO ---
+
+# --- Punto de Entrada ---
 if __name__ == "__main__":
     async def run_bot():
         await app_telegram.start()
