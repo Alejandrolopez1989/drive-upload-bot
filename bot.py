@@ -40,8 +40,12 @@ app_quart = Quart(__name__)
 app_telegram = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- Diccionarios y Colas en memoria ---
-active_operations = {} # {user_id: {'task', 'file_path', 'cancel_flag', 'original_message'}}
-upload_queue = deque() # [(user_id, original_message_obj), ...]
+# Cola simple para las solicitudes de subida pendientes [(user_id, message_obj), ...]
+upload_queue = deque()
+# Bandera para indicar si hay una operación activa
+processing_active = False
+
+active_operations = {}
 user_credentials = {}
 login_states = {}
 pending_emails = {}
@@ -229,104 +233,58 @@ async def set_bot_commands(client: Client):
 # --- Función para actualizar mensajes de usuarios en cola ---
 async def update_queue_messages(client: Client):
     """Actualiza los mensajes de estado para todos los usuarios en la cola."""
-    # Creamos una copia temporal para iterar y modificar
-    temp_queue = list(upload_queue)
-    upload_queue.clear()
-    
-    for i, (user_id, orig_msg) in enumerate(temp_queue):
+    for i, (user_id, msg_obj) in enumerate(upload_queue):
         position = i + 1
         try:
             await client.edit_message_text(
-                orig_msg.chat.id, orig_msg.id,
+                msg_obj.chat.id, msg_obj.id,
                 f"⏳ Tu video está en cola. Posición: {position}",
                 parse_mode=enums.ParseMode.MARKDOWN
             )
-            # Re-agregamos a la cola actualizada
-            upload_queue.append((user_id, orig_msg))
         except Exception as e:
             logger.warning(f"No se pudo actualizar mensaje de cola para {user_id}: {e}")
-            # Si falla, lo volvemos a meter a la cola para intentarlo de nuevo
-            upload_queue.append((user_id, orig_msg))
 
 # --- Función para procesar la cola ---
-async def process_queue(client: Client):
+async def process_next_in_queue(client: Client):
     """Toma el primer elemento de la cola y lo procesa."""
-    if active_operations:
-        return # Si ya hay una operación activa, no procesamos
-
+    global processing_active
     if upload_queue:
-        user_id, original_message = upload_queue.popleft()
-        # Actualizar mensajes de los usuarios restantes en cola
-        await update_queue_messages(client)
-        # Iniciar el procesamiento real
-        await handle_video_from_queue(client, original_message)
-
-# --- Manejador modificado para videos ---
-@app_telegram.on_message(filters.video & filters.private)
-async def handle_video(client: Client, message: Message):
-    user_id = message.from_user.id
-
-    if not is_user_authenticated(user_id):
-        await message.reply_text("❌ Conecta tu cuenta de Google Drive primero con /drive_login.")
-        return
-
-    # --- Sistema de Cola ---
-    # Todos los usuarios, incluido el admin, entran en la cola si hay operaciones activas
-    if active_operations:
-        # Si hay una operación activa, añadir a la cola
-        position = len(upload_queue) + 1
-        upload_queue.append((user_id, message))
-        # Editar el mensaje del usuario para mostrar que está en cola
-        try:
-            await client.edit_message_text(
-                message.chat.id, message.id,
-                f"⏳ Tu video está en cola. Posición: {position}",
-                parse_mode=enums.ParseMode.MARKDOWN
-            )
-        except Exception as e:
-            logger.error(f"Error editando mensaje del usuario {user_id} para cola: {e}")
-            # Si no se puede editar, enviar un mensaje aparte (fallback)
-            await message.reply_text(f"⏳ Tu video está en cola. Posición: {position}")
-        logger.info(f"Usuario {user_id} añadido a la cola en posición {position}")
+        user_id, message = upload_queue.popleft()
         # Actualizar mensajes de otros usuarios en cola
         await update_queue_messages(client)
-        return
-    # --- Fin Sistema de Cola ---
+        # Iniciar procesamiento
+        await process_video(client, message)
+    else:
+        processing_active = False
 
-    # Si no hay operaciones activas, procesar inmediatamente
-    await handle_video_from_queue(client, message)
-
-# --- Nueva función que contiene la lógica original de manejo de video ---
-async def handle_video_from_queue(client: Client, original_message: Message):
-    """Lógica principal de descarga y subida, editando el mensaje original."""
-    user_id = original_message.from_user.id
-    chat_id = original_message.chat.id
-    message_id = original_message.id
+# --- Función principal de procesamiento de video ---
+async def process_video(client: Client, message: Message):
+    """Procesa un video: descarga, sube a Drive y actualiza el mensaje original."""
+    global processing_active
+    processing_active = True
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    message_id = message.id
 
     if not is_user_authenticated(user_id):
         try:
-            await client.edit_message_text(chat_id, message_id, "❌ (Cola) Conecta tu cuenta de Google Drive primero con /drive_login.", parse_mode=enums.ParseMode.MARKDOWN)
+            await client.edit_message_text(chat_id, message_id, "❌ Conecta tu cuenta de Google Drive primero con /drive_login.", parse_mode=enums.ParseMode.MARKDOWN)
         except:
-            await client.send_message(chat_id, "❌ (Cola) Conecta tu cuenta de Google Drive primero con /drive_login.")
-        await process_queue(client)
+            await client.send_message(chat_id, "❌ Conecta tu cuenta de Google Drive primero con /drive_login.")
+        processing_active = False
+        await process_next_in_queue(client)
         return
 
     try:
         cancel_flag = asyncio.Event()
-        # Registrar la operación activa con el mensaje original
+        cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{user_id}")]]
+        reply_markup = InlineKeyboardMarkup(cancel_button)
+        
         active_operations[user_id] = {
             'task': asyncio.current_task(),
             'file_path': None,
-            'cancel_flag': cancel_flag,
-            'original_message': original_message # Guardamos la referencia
+            'cancel_flag': cancel_flag
         }
-        logger.info(f"Iniciando procesamiento para usuario {user_id}")
-
-        # --- Mostrar estado inicial en el mensaje original ---
-        try:
-            await client.edit_message_text(chat_id, message_id, "📥 Descargando el video... 0%", parse_mode=enums.ParseMode.MARKDOWN)
-        except Exception as e:
-            logger.warning(f"No se pudo editar el mensaje original de {user_id} al inicio: {e}")
 
         # --- Descarga con progreso ---
         last_update = time.time()
@@ -350,35 +308,33 @@ async def handle_video_from_queue(client: Client, original_message: Message):
                     if current_milestone > last_shown_progress:
                         main_loop.call_soon_threadsafe(
                             asyncio.create_task,
-                            update_original_message(client, chat_id, message_id, f"📥 Descargando el video... {current_milestone}%")
+                            update_status_message(client, chat_id, message_id, f"📥 Descargando el video... {current_milestone}%", user_id)
                         )
                         last_shown_progress = current_milestone
                 last_update = current_time
 
-        file_path = await client.download_media(original_message, progress=progress_callback)
+        # Editar el mensaje original para mostrar progreso de descarga
+        try:
+            await client.edit_message_text(chat_id, message_id, "📥 Descargando el video... 0%", reply_markup=reply_markup, parse_mode=enums.ParseMode.MARKDOWN)
+        except Exception as e:
+            logger.error(f"Error editando mensaje para descarga: {e}")
+
+        file_path = await client.download_media(message, progress=progress_callback)
 
         if cancel_flag.is_set():
-            try:
-                await client.edit_message_text(chat_id, message_id, "❌ Operación cancelada durante la descarga.", parse_mode=enums.ParseMode.MARKDOWN)
-            except Exception as e:
-                logger.error(f"Error editando mensaje cancelado para {user_id}: {e}")
+            await update_status_message(client, chat_id, message_id, "❌ Operación cancelada durante la descarga.", user_id, remove_buttons=True)
             if os.path.exists(file_path):
                 os.remove(file_path)
             active_operations.pop(user_id, None)
-            await process_queue(client)
+            processing_active = False
+            await process_next_in_queue(client)
             return
 
-        try:
-            await client.edit_message_text(chat_id, message_id, "📥 Descargando el video... 100%", parse_mode=enums.ParseMode.MARKDOWN)
-        except Exception as e:
-            logger.warning(f"No se pudo editar el mensaje de 100% descarga para {user_id}: {e}")
+        await update_status_message(client, chat_id, message_id, "📥 Descargando el video... 100%", user_id)
         await asyncio.sleep(0.5)
 
         active_operations[user_id]['file_path'] = file_path
-        try:
-            await client.edit_message_text(chat_id, message_id, "☁️ Subiendo a tu Google Drive... 0%", parse_mode=enums.ParseMode.MARKDOWN)
-        except Exception as e:
-            logger.warning(f"No se pudo editar el mensaje de inicio subida para {user_id}: {e}")
+        await update_status_message(client, chat_id, message_id, "☁️ Subiendo a tu Google Drive... 0%", user_id)
 
         # --- Subida con progreso ---
         last_shown_progress_upload = 0
@@ -397,49 +353,32 @@ async def handle_video_from_queue(client: Client, original_message: Message):
             if current_milestone > last_shown_progress_upload:
                 main_loop_upload.call_soon_threadsafe(
                     asyncio.create_task,
-                    update_original_message(client, chat_id, message_id, f"☁️ Subiendo a tu Google Drive... {current_milestone}%")
+                    update_status_message(client, chat_id, message_id, f"☁️ Subiendo a tu Google Drive... {current_milestone}%", user_id)
                 )
                 last_shown_progress_upload = current_milestone
 
-        file_name = f"video_{original_message.video.file_unique_id}_{original_message.video.file_name or 'video.mp4'}"
+        file_name = f"video_{message.video.file_unique_id}_{message.video.file_name or 'video.mp4'}"
         file_id = await upload_to_drive_with_progress(user_id, file_path, file_name, update_upload_progress, cancel_flag)
 
         if cancel_flag.is_set():
-            try:
-                await client.edit_message_text(chat_id, message_id, "❌ Operación cancelada durante la subida.", parse_mode=enums.ParseMode.MARKDOWN)
-            except Exception as e:
-                logger.error(f"Error editando mensaje cancelado (subida) para {user_id}: {e}")
+            await update_status_message(client, chat_id, message_id, "❌ Operación cancelada durante la subida.", user_id, remove_buttons=True)
             if os.path.exists(file_path):
                 os.remove(file_path)
             active_operations.pop(user_id, None)
-            await process_queue(client)
+            processing_active = False
+            await process_next_in_queue(client)
             return
 
         if file_id:
             file_url = get_file_url(file_id)
-            try:
-                await client.edit_message_text(
-                    chat_id, message_id,
-                    f"✅ ¡Video subido exitosamente a tu Google Drive!\n\n"
-                    f"🔗 [Descargar Video]({file_url})\n\n"
-                    f"Usa /ver_nube para ver y gestionar tus videos.",
-                    parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True
-                )
-            except Exception as e:
-                logger.error(f"Error editando mensaje final para {user_id}: {e}")
-                # Enviar como mensaje nuevo si no se pudo editar
-                await client.send_message(
-                    chat_id,
-                    f"✅ ¡Video subido exitosamente a tu Google Drive!\n\n"
-                    f"🔗 [Descargar Video]({file_url})\n\n"
-                    f"Usa /ver_nube para ver y gestionar tus videos.",
-                    parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True
-                )
+            await update_status_message(client, chat_id, message_id,
+                f"✅ ¡Video subido exitosamente a tu Google Drive!\n\n"
+                f"🔗 [Descargar Video]({file_url})\n\n"
+                f"Usa /ver_nube para ver y gestionar tus videos.",
+                user_id, remove_buttons=True
+            )
         else:
-            try:
-                await client.edit_message_text(chat_id, message_id, "❌ Error al subir el video a tu Google Drive.", parse_mode=enums.ParseMode.MARKDOWN)
-            except Exception as e:
-                logger.error(f"Error editando mensaje de error para {user_id}: {e}")
+            await update_status_message(client, chat_id, message_id, "❌ Error al subir el video a tu Google Drive.", user_id, remove_buttons=True)
 
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -448,9 +387,9 @@ async def handle_video_from_queue(client: Client, original_message: Message):
         if "Operación cancelada por el usuario" in str(e):
             logger.info(f"Operación cancelada por el usuario {user_id}")
         else:
-            logger.error(f"Error en handle_video_from_queue para {user_id}: {e}")
+            logger.error(f"Error en process_video para {user_id}: {e}")
             try:
-                await client.edit_message_text(chat_id, message_id, f"❌ Ocurrió un error: {str(e)}", parse_mode=enums.ParseMode.MARKDOWN)
+                await update_status_message(client, chat_id, message_id, f"❌ Ocurrió un error: {str(e)}", user_id, remove_buttons=True)
             except Exception as edit_e:
                 logger.error(f"Fallo al editar mensaje de error para {user_id}: {edit_e}")
                 await client.send_message(chat_id, f"❌ Ocurrió un error: {str(e)}")
@@ -462,16 +401,22 @@ async def handle_video_from_queue(client: Client, original_message: Message):
     finally:
         active_operations.pop(user_id, None)
         logger.info(f"Finalizado procesamiento para usuario {user_id}")
-        await process_queue(client)
+        processing_active = False
+        await process_next_in_queue(client)
 
-# --- Función auxiliar para actualizar el mensaje original del usuario ---
-async def update_original_message(client: Client, chat_id: int, message_id: int, text: str):
-    """Actualiza el mensaje original del usuario con el texto proporcionado."""
+# --- Función auxiliar para actualizar mensajes de estado ---
+async def update_status_message(client: Client, chat_id: int, message_id: int, text: str, user_id: int, remove_buttons: bool = False):
+    """Actualiza un mensaje de estado, manejando errores de edición."""
     try:
-        await client.edit_message_text(chat_id, message_id, text, parse_mode=enums.ParseMode.MARKDOWN)
+        if remove_buttons:
+            await client.edit_message_text(chat_id, message_id, text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        else:
+            cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{user_id}")]]
+            reply_markup = InlineKeyboardMarkup(cancel_button)
+            await client.edit_message_text(chat_id, message_id, text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True, reply_markup=reply_markup)
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
-            logger.error(f"Error actualizando mensaje original {chat_id}:{message_id}: {e}")
+            logger.error(f"Error actualizando mensaje: {e}")
 
 @app_telegram.on_callback_query()
 async def on_callback_query(client: Client, callback_query: CallbackQuery):
@@ -482,32 +427,53 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
         if user_id != target_user_id:
             await callback_query.answer("❌ No puedes cancelar la operación de otro usuario.", show_alert=True)
             return
-
         if user_id in active_operations:
             operation = active_operations[user_id]
             operation['cancel_flag'].set()
-            orig_msg = operation['original_message']
-            try:
-                await client.edit_message_text(orig_msg.chat.id, orig_msg.id, "⏳ Cancelando operación...", parse_mode=enums.ParseMode.MARKDOWN)
-            except Exception as e:
-                logger.error(f"Error editando mensaje de cancelación para {user_id}: {e}")
+            # El mensaje se actualizará en process_video
             await callback_query.answer("Operación cancelada.")
         else:
             await callback_query.answer("❌ No hay operación activa para cancelar.", show_alert=True)
-
     else:
         await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
 
-# --- Comandos restantes (sin cambios sustanciales) ---
+# --- Manejador principal para videos ---
+@app_telegram.on_message(filters.video & filters.private)
+async def handle_video(client: Client, message: Message):
+    user_id = message.from_user.id
+    if not is_user_authenticated(user_id):
+        await message.reply_text("❌ Conecta tu cuenta de Google Drive primero con /drive_login.")
+        return
+
+    global processing_active
+    if processing_active:
+        # Si hay una operación activa, añadir a la cola
+        position = len(upload_queue) + 1
+        upload_queue.append((user_id, message))
+        try:
+            await client.edit_message_text(
+                message.chat.id, message.id,
+                f"⏳ Tu video está en cola. Posición: {position}",
+                parse_mode=enums.ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Error editando mensaje del usuario {user_id} para cola: {e}")
+            await message.reply_text(f"⏳ Tu video está en cola. Posición: {position}")
+        logger.info(f"Usuario {user_id} añadido a la cola en posición {position}")
+        await update_queue_messages(client)
+        return
+
+    # Si no hay operaciones activas, procesar inmediatamente
+    await process_video(client, message)
+
+# --- Comandos restantes (sin cambios) ---
 @app_telegram.on_message(filters.command("drive_login"))
 async def drive_login_command(client: Client, message: Message):
     user_id = message.from_user.id
     user_name = message.from_user.first_name or message.from_user.username or "Usuario"
-
     if is_user_authenticated(user_id):
         await message.reply_text("✅ Tu cuenta de Google Drive ya está conectada.")
         return
-
     if user_id == ADMIN_TELEGRAM_ID:
         await message.reply_text(
             f"✅ ¡Hola Administrador {user_name}!\n"
@@ -516,8 +482,7 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        # CORRECCIÓN AQUÍ: Usar creds_data y agregar :
-        if not creds_data: # <-- Corrección aquí
+        if not creds_ # <-- Corrección aquí
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
         try:
@@ -541,7 +506,6 @@ async def drive_login_command(client: Client, message: Message):
             if os.path.exists('credentials_temp.json'):
                 os.remove('credentials_temp.json')
         return
-
     if user_id not in approved_users:
         if user_id in pending_emails:
             await message.reply_text(
@@ -558,19 +522,16 @@ async def drive_login_command(client: Client, message: Message):
                 "**Importante:** No uses `/drive_login` hasta la notificación."
             )
         return
-
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    # CORRECCIÓN AQUÍ: Usar creds_data y agregar :
-    if not creds_data: # <-- Corrección aquí
+    if not creds_ # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
             try:
                 await client.send_message(ADMIN_TELEGRAM_ID, f"❌ Error en /drive_login: GOOGLE_CREDENTIALS_JSON no configuradas.")
             except: pass
         return
-
     try:
         async with aiofiles.open('credentials_temp.json', 'w') as f:
             await f.write(creds_data)
@@ -607,7 +568,7 @@ async def ver_nube_command(client: Client, message: Message):
     if not service:
         await message.reply_text("❌ Problema de conexión con tu Drive. Intenta desconectarte y reconectarte.")
         return
-    status_message = await message.reply_text("🔍 Buscando videos...")
+    status_message = await message.reply_text("🔍 Buscando videos en Google Drive...")
     videos = list_drive_videos(user_id)
     if not videos:
         await status_message.edit_text("No se encontraron videos en tu nube.")
@@ -654,23 +615,14 @@ async def handle_user_email(client: Client, message: Message):
     user_id = message.from_user.id
     if is_user_authenticated(user_id) or user_id in approved_users:
         return
-
     user_name = message.from_user.first_name or message.from_user.username or "Usuario"
     text = message.text.strip()
-
     if "@" in text and "." in text and " " not in text:
         email = text
         pending_emails[user_id] = email
-
-        # --- Almacenar información del usuario ---
         user_mention = message.from_user.username
         user_display = f"@{user_mention}" if user_mention else user_name
-        user_info[user_id] = {
-            'name': user_name,
-            'username': user_display
-        }
-        # --- Fin almacenamiento ---
-
+        user_info[user_id] = {'name': user_name, 'username': user_display}
         if ADMIN_TELEGRAM_ID:
             try:
                 admin_msg = (
@@ -695,18 +647,15 @@ async def handle_user_email(client: Client, message: Message):
 @app_telegram.on_message(filters.command("aprobar_usuario") & filters.private)
 async def approve_user_command(client: Client, message: Message):
     logger.info(f"✅ /aprobar_usuario recibido de {message.from_user.id}")
-
     if message.from_user.id != ADMIN_TELEGRAM_ID:
         logger.warning(f"❌ Acceso denegado a /aprobar_usuario para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
         await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
         return
-
     command_parts = message.text.strip().split()
     if len(command_parts) < 2:
         await message.reply_text("Uso: `/aprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
         logger.info("❌ /aprobar_usuario usado sin argumentos")
         return
-
     try:
         target_user_id_str = command_parts[1]
         if not target_user_id_str.isdigit():
@@ -721,14 +670,11 @@ async def approve_user_command(client: Client, message: Message):
         logger.error(f"❌ Error inesperado parseando user_id: {e}")
         await message.reply_text("❌ Error al procesar el ID de usuario.")
         return
-
     try:
         approved_users.add(target_user_id)
         logger.info(f"✅ Usuario {target_user_id} añadido a approved_users. Total aprobados: {len(approved_users)}")
-
         await message.reply_text(f"✅ Usuario `{target_user_id}` ha sido aprobado.", parse_mode=enums.ParseMode.MARKDOWN)
         logger.info(f"✅ Confirmación de aprobación enviada al admin {ADMIN_TELEGRAM_ID}")
-
         try:
             user_msg = (
                 f"🎉 ¡Hola! El administrador ha aprobado tu solicitud.\n\n"
@@ -741,7 +687,6 @@ async def approve_user_command(client: Client, message: Message):
             error_msg = f"⚠️ Usuario {target_user_id} aprobado, pero no se pudo notificar: {notify_e}"
             logger.error(error_msg)
             await message.reply_text(error_msg)
-
     except Exception as e:
         logger.error(f"❌ Error en lógica de aprobación para {target_user_id}: {e}", exc_info=True)
         await message.reply_text(f"⚠️ Ocurrió un error al aprobar al usuario: {e}")
@@ -749,18 +694,15 @@ async def approve_user_command(client: Client, message: Message):
 @app_telegram.on_message(filters.command("desaprobar_usuario") & filters.private)
 async def revoke_user_command(client: Client, message: Message):
     logger.info(f"✅ /desaprobar_usuario recibido de {message.from_user.id}")
-
     if message.from_user.id != ADMIN_TELEGRAM_ID:
         logger.warning(f"❌ Acceso denegado a /desaprobar_usuario para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
         await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
         return
-
     command_parts = message.text.strip().split()
     if len(command_parts) < 2:
         await message.reply_text("Uso: `/desaprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
         logger.info("❌ /desaprobar_usuario usado sin argumentos")
         return
-
     try:
         target_user_id_str = command_parts[1]
         if not target_user_id_str.isdigit():
@@ -775,31 +717,25 @@ async def revoke_user_command(client: Client, message: Message):
         logger.error(f"❌ Error inesperado parseando user_id para desaprobación: {e}")
         await message.reply_text("❌ Error al procesar el ID de usuario.")
         return
-
     try:
         if target_user_id not in approved_users:
             await message.reply_text(f"⚠️ El usuario `{target_user_id}` no está en la lista de usuarios aprobados.", parse_mode=enums.ParseMode.MARKDOWN)
             logger.info(f"⚠️ Intento de desaprobar usuario no aprobado: {target_user_id}")
             return
-
         approved_users.discard(target_user_id)
         user_info.pop(target_user_id, None)
         logger.info(f"✅ Usuario {target_user_id} eliminado de approved_users. Total aprobados: {len(approved_users)}")
-
         pending_email = pending_emails.pop(target_user_id, None)
         if pending_email:
             logger.info(f"ℹ️ Correo pendiente eliminado para {target_user_id}: {pending_email}")
-
         user_credentials.pop(target_user_id, None)
         logger.info(f"ℹ️ Credenciales eliminadas para {target_user_id} (si existían).")
-
         await message.reply_text(
             f"✅ Usuario `{target_user_id}` ha sido **desaprobado**.\n"
             f"Ahora deberá enviar su correo nuevamente y ser aprobado para poder autenticarse.",
             parse_mode=enums.ParseMode.MARKDOWN
         )
         logger.info(f"✅ Confirmación de desaprobación enviada al admin {ADMIN_TELEGRAM_ID}")
-
     except Exception as e:
         logger.error(f"❌ Error en lógica de desaprobación para {target_user_id}: {e}", exc_info=True)
         await message.reply_text(f"⚠️ Ocurrió un error al desaprobar al usuario: {e}")
@@ -807,31 +743,26 @@ async def revoke_user_command(client: Client, message: Message):
 @app_telegram.on_message(filters.command("lista_aprobados") & filters.private)
 async def list_approved_users_command(client: Client, message: Message):
     logger.info(f"✅ /lista_aprobados recibido de {message.from_user.id}")
-
     if message.from_user.id != ADMIN_TELEGRAM_ID:
         logger.warning(f"❌ Acceso denegado a /lista_aprobados para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
         await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
         return
-
     if not approved_users:
         await message.reply_text("ℹ️ La lista de usuarios aprobados está vacía.")
         return
-
     response_text = f"**Lista de usuarios aprobados ({len(approved_users)}):**\n"
     for user_id in approved_users:
         info = user_info.get(user_id, {})
         name = info.get('name', 'Desconocido')
         username = info.get('username', 'Sin @')
-
         response_text += f"- **{name}** ({username}) - `{user_id}`\n"
-
     await message.reply_text(response_text, parse_mode=enums.ParseMode.MARKDOWN)
     logger.info(f"✅ Lista de aprobados enviada al admin {ADMIN_TELEGRAM_ID}")
 
 # --- Rutas Web OAuth ---
 @app_quart.route('/')
 async def index():
-    return '<h1>Bot Listo</h1><p>El bot está en funcionamiento.</p>'
+    return '<h1>Bot Listo</h1><p>El bot está en funcionamiento. Usa Telegram para interactuar.</p>'
 
 @app_quart.route('/oauth2callback')
 async def oauth2callback():
@@ -840,17 +771,13 @@ async def oauth2callback():
     if not code:
         return 'Error: No se recibió el código de autorización.', 400
     if not state or state not in login_states:
-         return 'Error: Estado de autenticación no válido.', 400
-
+         return 'Error: Estado de autenticación no válido o expirado.', 400
     user_id = login_states.pop(state, None)
     if not user_id:
         return 'Error: No se pudo asociar el código con un usuario.', 400
-
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    # CORRECCIÓN AQUÍ: Usar creds_data y agregar :
-    if not creds_data: # <-- Corrección aquí
-        return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
-
+    if not creds_ # <-- Corrección aquí
+        return "Error: GOOGLE_CREDENTIALS_JSON no está configurado en el servidor.", 500
     try:
         async with aiofiles.open('credentials_temp.json', 'w') as f:
             await f.write(creds_data)
@@ -862,14 +789,19 @@ async def oauth2callback():
         user_credentials[user_id] = creds
         if os.path.exists('credentials_temp.json'):
             os.remove('credentials_temp.json')
-        return """
+        return f"""
         <h1>¡Autenticación Exitosa!</h1>
-        <p>Tu cuenta de Google Drive ha sido conectada.</p>
+        <p>Tu cuenta de Google Drive ha sido conectada al bot.</p>
+        <p>ID de usuario asociado: {user_id}</p>
         <p>Puedes cerrar esta ventana y usar el bot en Telegram.</p>
-        <script>setTimeout(function() { window.close(); }, 3000);</script>
+        <script>
+            setTimeout(function() {{
+                window.close();
+            }}, 5000);
+        </script>
         """
     except Exception as e:
-        logger.error(f"Error en oauth2callback para {user_id}: {e}")
+        logger.error(f"Error en oauth2callback para el usuario {user_id}: {e}")
         if os.path.exists('credentials_temp.json'):
             os.remove('credentials_temp.json')
         return f'Error durante la autenticación: {e}', 500
