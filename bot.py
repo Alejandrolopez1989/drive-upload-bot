@@ -232,7 +232,7 @@ async def update_queue_messages(client: Client):
     # Creamos una copia temporal para iterar y modificar
     temp_queue = list(upload_queue)
     upload_queue.clear()
-
+    
     for i, (user_id, orig_msg) in enumerate(temp_queue):
         position = i + 1
         try:
@@ -498,7 +498,7 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
 
-# --- Comandos restantes ---
+# --- Comandos restantes (sin cambios sustanciales) ---
 @app_telegram.on_message(filters.command("drive_login"))
 async def drive_login_command(client: Client, message: Message):
     user_id = message.from_user.id
