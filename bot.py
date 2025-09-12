@@ -8,8 +8,8 @@ import time
 import mimetypes
 import aiofiles
 import secrets
-import uuid # Para generar IDs únicos de tarea
-from collections import deque # Para una cola auxiliar de posiciones (opcional)
+import uuid
+from collections import deque
 from quart import Quart, request, redirect, url_for
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, CallbackQuery
@@ -34,34 +34,30 @@ ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "telegramprueba30@gmail.com")
 
 # --- CONFIGURACIÓN DE GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
-RENDER_REDIRECT_URI = "https://google-drive-vip.onrender.com/oauth2callback"
+RENDER_REDIRECT_URI = os.environ.get("RENDER_REDIRECT_URI", "https://google-drive-vip.onrender.com/oauth2callback")
 
 # --- Inicialización ---
 app_quart = Quart(__name__)
 app_telegram = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- Diccionarios y Colas en memoria ---
-active_operations = {} # {user_id: {...}} - Operaciones ACTIVAS (en proceso de descarga/subida)
+active_operations = {} # {task_id: {...}} - Operaciones ACTIVAS (en proceso de descarga/subida)
 user_credentials = {}
 login_states = {}
 pending_emails = {}
 approved_users = set()
 user_info = {} # {user_id: {'name': '...', 'username': '...'}}
 
-# --- NUEVO: Sistema de Cola ---
-# Cola principal para solicitudes de subida
+# --- NUEVO: Sistema de Cola Mejorado ---
 upload_queue = asyncio.Queue()
-# Diccionario para rastrear tareas en cola por task_id
-queued_tasks = {} # {task_id: {'user_id': ..., 'message_id': ..., 'file_name': ...}}
-# Diccionario para rastrear la posición estimada en cola por user_id (opcional, para mensajes más precisos)
-# Se podría usar un deque o simplemente recorrer la cola internamente si se necesita más precisión
-# Por simplicidad, usaremos el tamaño de la cola como posición aproximada para el primer mensaje.
+queued_tasks = {} # {task_id: {'user_id': ..., 'message_id': ..., 'file_name': ..., 'position': ...}}
+total_uploads_queued = 0 # Contador global de uploads encolados
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Funciones auxiliares para Google Drive ---
-# ... (Sin cambios en estas funciones) ...
+# ... (Sin cambios en estas funciones, copia tu código original aquí) ...
 def is_user_authenticated(user_id):
     creds = user_credentials.get(user_id)
     if not creds:
@@ -98,9 +94,8 @@ def get_user_drive_service(user_id):
         user_credentials.pop(user_id, None)
         return None
 
-# --- Clase para subida con progreso ---
-# ... (Sin cambios en esta clase) ...
 class ProgressMediaUpload(MediaIoBaseUpload):
+    # ... (Sin cambios en esta clase, copia tu código original aquí) ...
     def __init__(self, filename, mimetype=None, chunksize=1024 * 1024, resumable=False, callback=None, cancel_flag=None):
         self._filename = filename
         self._file_handle = open(filename, 'rb')
@@ -140,6 +135,7 @@ class ProgressMediaUpload(MediaIoBaseUpload):
             self._file_handle.close()
 
 async def upload_to_drive_with_progress(user_id, file_path, file_name, progress_callback, cancel_flag):
+    # ... (Sin cambios en esta función, copia tu código original aquí) ...
     service = get_user_drive_service(user_id)
     if not service:
         return None
@@ -169,6 +165,7 @@ def get_file_url(file_id):
     return f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
 
 def list_drive_videos(user_id):
+    # ... (Sin cambios en esta función, copia tu código original aquí) ...
     service = get_user_drive_service(user_id)
     if not service:
         return []
@@ -197,6 +194,7 @@ def list_drive_videos(user_id):
         return []
 
 def delete_from_drive(file_id, user_id):
+    # ... (Sin cambios en esta función, copia tu código original aquí) ...
     service = get_user_drive_service(user_id)
     if not service:
         return False
@@ -209,6 +207,7 @@ def delete_from_drive(file_id, user_id):
 
 # --- Función auxiliar para actualizar mensajes de estado ---
 async def update_status_message(client: Client, chat_id: int, message_id: int, text: str, user_id: int, remove_buttons: bool = False):
+    # ... (Sin cambios en esta función, copia tu código original aquí) ...
     try:
         if remove_buttons:
             await client.edit_message_text(chat_id, message_id, text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
@@ -223,16 +222,15 @@ async def update_status_message(client: Client, chat_id: int, message_id: int, t
 # --- NUEVA: Función para procesar la cola de subidas ---
 async def process_upload_queue(client: Client):
     """Función asíncrona continua que procesa videos de la cola."""
+    global total_uploads_queued # Acceder a la variable global
     while True:
         try:
-            # Tomar una solicitud de la cola (se bloquea hasta que haya una)
             queue_item = await upload_queue.get()
             task_id = queue_item['task_id']
             
-            # Verificar si la tarea fue cancelada mientras estaba en cola
             if task_id not in queued_tasks:
                 logger.info(f"Tarea {task_id} fue cancelada mientras estaba en cola.")
-                upload_queue.task_done() # Marcar como completada
+                upload_queue.task_done()
                 continue
 
             user_id = queue_item['user_id']
@@ -242,9 +240,20 @@ async def process_upload_queue(client: Client):
             logger.info(f"Iniciando procesamiento de video en cola para user {user_id}, tarea {task_id}")
 
             # Mover la tarea de 'en cola' a 'activa'
-            queued_tasks.pop(task_id, None) # Eliminar de la cola de tareas pendientes
+            queued_tasks.pop(task_id, None)
+            
+            # --- NUEVO: Actualizar posiciones de las tareas restantes en cola ---
+            # Decrementar el contador global
+            total_uploads_queued -= 1
+            # Actualizar la posición almacenada de las tareas restantes en queued_tasks
+            tasks_to_update = list(queued_tasks.keys()) # Crear una lista para evitar errores de modificación durante la iteración
+            for tid in tasks_to_update:
+                 if tid in queued_tasks: # Verificar nuevamente dentro del bucle
+                    old_pos = queued_tasks[tid].get('position', 0)
+                    if old_pos > 0:
+                        queued_tasks[tid]['position'] = old_pos - 1
+            # --- FIN NUEVO ---
 
-            # Verificar autenticación nuevamente antes de procesar
             if not is_user_authenticated(user_id):
                  await message.reply_text("❌ Tu cuenta de Google Drive ya no está conectada. Por favor, vuelve a autenticarte con /drive_login.")
                  upload_queue.task_done()
@@ -259,18 +268,19 @@ async def process_upload_queue(client: Client):
             # --- Lógica de descarga y subida (extraída de handle_video) ---
             try:
                 cancel_flag = asyncio.Event()
-                cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{task_id}")]] # Usar task_id para cancelar
+                # Usar task_id para cancelar
+                cancel_button = [[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{task_id}")]]
                 reply_markup = InlineKeyboardMarkup(cancel_button)
                 status_message = await message.reply_text("📥 Descargando el video... 0%", reply_markup=reply_markup)
                 status_message_id = status_message.id
-                # Registrar como operación activa usando task_id en lugar de user_id
+                # Registrar como operación activa usando task_id
                 active_operations[task_id] = {
                     'task': asyncio.current_task(),
                     'file_path': None,
                     'status_message_id': status_message_id,
                     'cancel_flag': cancel_flag,
-                    'user_id': user_id, # Guardar user_id también
-                    'message': message # Guardar el mensaje original
+                    'user_id': user_id,
+                    'message': message
                 }
                 last_update = time.time()
                 main_loop = asyncio.get_running_loop()
@@ -355,32 +365,30 @@ async def process_upload_queue(client: Client):
                     os.remove(file_path)
             except Exception as e:
                 if "Operación cancelada por el usuario" in str(e):
-                    pass # El mensaje ya se manejó
+                    pass
                 else:
                     logger.error(f"Error en process_upload_queue para tarea {task_id} (user {user_id}): {e}")
                     status_message_id = active_operations.get(task_id, {}).get('status_message_id')
                     if status_message_id:
-                        # Usar user_id para el botón de cancelar, aunque la operación esté por task_id
                         await update_status_message(client, message.chat.id, status_message_id, f"❌ Ocurrió un error: {str(e)}", user_id, remove_buttons=True)
                     try:
                         if 'file_path' in locals() and os.path.exists(file_path):
                             os.remove(file_path)
                     except: pass
             finally:
-                # Limpiar operación activa
                 active_operations.pop(task_id, None)
-                upload_queue.task_done() # Marcar esta tarea de la cola como terminada
+                upload_queue.task_done()
                 
         except asyncio.CancelledError:
             logger.info("Tarea de procesamiento de cola cancelada.")
-            break # Salir del bucle si la tarea es cancelada
+            break
         except Exception as e:
             logger.error(f"Error inesperado en process_upload_queue: {e}")
-            # No rompemos el bucle, continuamos procesando la cola
-            upload_queue.task_done() # Asegurarse de marcar como hecho incluso si hay error
+            upload_queue.task_done()
 
 # --- Manejadores de Pyrogram ---
 @app_telegram.on_message(filters.command("start"))
+# ... (Sin cambios en este manejador, copia tu código original aquí) ...
 async def start_command(client: Client, message: Message):
     welcome_text = (
         "¡Hola! 👋\n\n"
@@ -393,11 +401,11 @@ async def start_command(client: Client, message: Message):
     await message.reply_text(welcome_text)
 
 async def set_bot_commands(client: Client):
+    # ... (Sin cambios en este manejador, copia tu código original aquí) ...
     commands = [
         BotCommand("start", "Mostrar mensaje de inicio"),
         BotCommand("drive_login", "Conectar tu cuenta de Google Drive"),
         BotCommand("ver_nube", "Ver tus videos en la nube"),
-        # Comandos exclusivos del administrador
         BotCommand("lista_aprobados", "🔐 Ver lista de usuarios aprobados (Admin)"),
         BotCommand("desaprobar_usuario", "🔐 Desaprobar un usuario (Admin)"),
     ]
@@ -408,7 +416,7 @@ async def set_bot_commands(client: Client):
         logger.error(f"Error estableciendo comandos: {e}")
 
 @app_telegram.on_message(filters.command("drive_login"))
-# ... (Sin cambios en este manejador) ...
+# ... (Sin cambios en este manejador, copia tu código original aquí) ...
 async def drive_login_command(client: Client, message: Message):
     user_id = message.from_user.id
     user_name = message.from_user.first_name or message.from_user.username or "Usuario"
@@ -505,7 +513,7 @@ async def drive_login_command(client: Client, message: Message):
             os.remove('credentials_temp.json')
 
 @app_telegram.on_message(filters.command("ver_nube"))
-# ... (Sin cambios en este manejador) ...
+# ... (Sin cambios en este manejador, copia tu código original aquí) ...
 async def ver_nube_command(client: Client, message: Message):
     user_id = message.from_user.id
     if not is_user_authenticated(user_id):
@@ -536,6 +544,7 @@ async def ver_nube_command(client: Client, message: Message):
     else:
         await status_message.edit_text(response_text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
 
+# --- MODIFICADO: handle_video con lógica de cola corregida ---
 @app_telegram.on_message(filters.video & filters.private)
 async def handle_video(client: Client, message: Message):
     user_id = message.from_user.id
@@ -543,12 +552,21 @@ async def handle_video(client: Client, message: Message):
         await message.reply_text("❌ Conecta tu cuenta de Google Drive primero con /drive_login.")
         return
 
-    # --- NUEVO: Lógica de Cola ---
-    # Generar un ID único para esta tarea
+    global total_uploads_queued # Acceder a la variable global
+
     task_id = str(uuid.uuid4())
     file_name = message.video.file_name or 'video.mp4'
     
-    # Crear el item de la cola
+    # --- NUEVO: Calcular posición antes de incrementar el contador ---
+    # La posición del nuevo elemento es el número total de elementos en cola + 1
+    # (ya que el elemento aún no se ha agregado)
+    current_queue_size = upload_queue.qsize()
+    new_position = current_queue_size + 1 # Posición 1-indexed
+    
+    # Incrementar el contador global *después* de calcular la posición
+    total_uploads_queued += 1
+    # --- FIN NUEVO ---
+    
     queue_item = {
         'task_id': task_id,
         'user_id': user_id,
@@ -556,71 +574,69 @@ async def handle_video(client: Client, message: Message):
         'file_name': file_name
     }
     
-    # Agregar a la cola y al diccionario de tareas en cola
     await upload_queue.put(queue_item)
+    
+    # --- NUEVO: Almacenar la posición en queued_tasks ---
     queued_tasks[task_id] = {
         'user_id': user_id,
-        'message_id': message.id, # ID del mensaje original del video
-        'file_name': file_name
+        'message_id': message.id,
+        'file_name': file_name,
+        'position': new_position # Almacenar la posición calculada
     }
+    # --- FIN NUEVO ---
     
-    # Calcular posición aproximada en cola (la longitud actual es la posición del nuevo item)
-    position_in_queue = upload_queue.qsize() # Esto incluye el item recién agregado
-    
-    # Informar al usuario
-    if position_in_queue == 1:
-        await message.reply_text("⏳ Tu video está siendo procesado ahora.")
+    # --- NUEVO: Informar al usuario con la posición correcta ---
+    # Si hay 0 elementos en la cola, significa que este es el único, y se está procesando.
+    # Si hay > 0 elementos en la cola, este está esperando.
+    if current_queue_size == 0 and new_position == 1:
+        # Caso especial: si no hay otros en cola, este podría ser el que se está procesando.
+        # Pero como acabamos de ponerlo, y process_upload_queue lo toma uno por uno,
+        # si la cola estaba vacía, este será el próximo en procesarse.
+        # Mejor: simplemente decirle que está en la posición 1.
+        await message.reply_text("⏳ Su video está en cola. Posición: 1.")
     else:
-        # Posición es la cantidad en cola (incluyendo este) - 1 (porque el primero ya se está procesando)
-        # Pero como acabamos de ponerlo, la posición es simplemente la cantidad en cola
-        # Mejor: posición = posición actual en la cola (qsize)
-        # Si hay 3 items, el nuevo está en la posición 3 (1-indexed)
-        await message.reply_text(f"⏳ Video en cola. Posición: {position_in_queue}.")
-
-    logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición aproximada: {position_in_queue}")
+        # Hay otros en cola, o este es el primero pero hay uno procesándose.
+        # La posición calculada es correcta.
+        await message.reply_text(f"⏳ Su video está en cola. Posición: {new_position}.")
     # --- FIN NUEVO ---
 
-# Nota: El manejador handle_video original (con la lógica de descarga/subida) se ha movido a process_upload_queue
-# Aquí solo se agrega a la cola y se informa al usuario.
+    logger.info(f"Video de user {user_id} agregado a la cola. Tarea ID: {task_id}. Posición: {new_position}")
 
+# ... (Los manejadores restantes como on_callback_query, delete_file, handle_user_email, 
+# approve_user_command, revoke_user_command, list_approved_users_command, oauth2callback 
+# y el Punto de Entrada se mantienen igual o con cambios menores como en la respuesta anterior.
+# Copia tu código original para estas secciones o usa el código proporcionado en la respuesta anterior) ...
+
+# --- Ejemplo de cómo podría quedar on_callback_query (solo cambios relevantes) ---
 @app_telegram.on_callback_query()
 async def on_callback_query(client: Client, callback_query: CallbackQuery):
     data = callback_query.data
     user_id = callback_query.from_user.id
     
     if data.startswith("cancel_"):
-        # El callback_data ahora puede ser cancel_<user_id> (para operaciones antiguas) o cancel_<task_id>
-        identifier = data.split("_", 1)[1] # Obtener todo después del primer '_'
+        identifier = data.split("_", 1)[1]
         
-        # Intentar cancelar por task_id (nuevo sistema)
         if identifier in queued_tasks:
-            # Cancelar tarea en cola
             task_info = queued_tasks.pop(identifier)
-            # Podríamos intentar removerlo de la cola, pero Queue no lo permite fácilmente.
-            # Simplemente lo marcamos como cancelado en nuestro diccionario.
-            # La tarea en la cola se procesará, pero saldrá inmediatamente.
+            # --- NUEVO: Actualizar posiciones al cancelar ---
+            global total_uploads_queued
+            total_uploads_queued -= 1
+            cancelled_position = task_info.get('position', 0)
+            if cancelled_position > 0:
+                 tasks_to_update = list(queued_tasks.keys())
+                 for tid in tasks_to_update:
+                     if tid in queued_tasks:
+                        old_pos = queued_tasks[tid].get('position', 0)
+                        if old_pos > cancelled_position: # Solo actualizar tareas que estaban detrás
+                            queued_tasks[tid]['position'] = old_pos - 1
+            # --- FIN NUEVO ---
             logger.info(f"Tarea en cola {identifier} cancelada por el usuario {user_id}")
-            await callback_query.answer("Operación cancelada.")
-            # Enviar mensaje al usuario
-            try:
-                 original_message_id = task_info['message_id']
-                 # Como no tenemos el chat_id directamente, necesitamos guardarlo o usar otro método.
-                 # Por simplicidad, respondemos al callback_query. Para una mejor UX, se podría mejorar.
-                 # O usar el mensaje original si se pasó correctamente.
-                 # Mejor: si guardamos el mensaje original en queued_tasks
-                 # await client.send_message(task_info['chat_id'], "❌ Operación cancelada mientras estaba en cola.", reply_to_message_id=original_message_id)
-                 # Pero no tenemos chat_id en queued_tasks. Se puede añadir.
-                 # Por ahora, respondemos al callback.
-                 await callback_query.answer("Operación cancelada mientras estaba en cola.", show_alert=True)
-            except Exception as e:
-                 logger.error(f"Error notificando cancelación de tarea en cola: {e}")
+            await callback_query.answer("Operación cancelada mientras estaba en cola.", show_alert=True)
             return
             
         elif identifier in active_operations:
-            # Cancelar operación activa (por task_id)
             task_id_to_cancel = identifier
             operation = active_operations[task_id_to_cancel]
-            # Verificar permiso (el user_id debe coincidir o ser admin)
             if operation['user_id'] != user_id and user_id != ADMIN_TELEGRAM_ID:
                  await callback_query.answer("❌ No puedes cancelar la operación de otro usuario.", show_alert=True)
                  return
@@ -635,268 +651,13 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
 
-@app_telegram.on_message(filters.regex(r"^/delete_([a-zA-Z0-9_-]+)$"))
-# ... (Sin cambios en este manejador) ...
-async def delete_file(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_user_authenticated(user_id):
-        await message.reply_text("❌ Conecta tu cuenta de Google Drive primero con /drive_login.")
-        return
-    service = get_user_drive_service(user_id)
-    if not service:
-        await message.reply_text("❌ Problema de conexión con tu Drive.")
-        return
-    match = message.matches[0] if message.matches else None
-    if not match:
-        await message.reply_text("❌ Comando no válido.")
-        return
-    file_id = match.group(1)
-    status_message = await message.reply_text("🗑️ Eliminando video...")
-    if delete_from_drive(file_id, user_id):
-        await status_message.edit_text("✅ Video eliminado exitosamente de tu Google Drive.")
-    else:
-        await status_message.edit_text("❌ Error al eliminar el video de tu Google Drive.")
-
-# --- Manejador para correos de usuarios ---
-# ... (Sin cambios en este manejador) ...
-@app_telegram.on_message(filters.text & filters.private & ~filters.me & ~filters.regex(r"^/"))
-async def handle_user_email(client: Client, message: Message):
-    user_id = message.from_user.id
-    if is_user_authenticated(user_id) or user_id in approved_users:
-        return
-
-    user_name = message.from_user.first_name or message.from_user.username or "Usuario"
-    text = message.text.strip()
-
-    if "@" in text and "." in text and " " not in text:
-        email = text
-        pending_emails[user_id] = email
-        
-        user_mention = message.from_user.username
-        user_display = f"@{user_mention}" if user_mention else "Sin @username"
-        user_info[user_id] = {
-            'name': user_name,
-            'username': user_display
-        }
-
-        if ADMIN_TELEGRAM_ID:
-            try:
-                admin_msg = (
-                    f"📧 **Nuevo correo para aprobación:**\n"
-                    f"**Nombre:** {user_name}\n"
-                    f"**Usuario:** {user_display}\n"
-                    f"**ID:** `{user_id}`\n"
-                    f"**Correo:** `{email}`\n\n"
-                    f"**Acción:** Agrega el correo a 'Usuarios de prueba' en Google Cloud Console "
-                    f"y luego usa `/aprobar_usuario {user_id}`."
-                )
-                await client.send_message(ADMIN_TELEGRAM_ID, admin_msg, parse_mode=enums.ParseMode.MARKDOWN)
-                await message.reply_text("✅ Correo recibido. El administrador ha sido notificado.")
-            except Exception as e:
-                logger.error(f"Error notificando admin: {e}")
-                await message.reply_text("❌ Error al procesar tu correo.")
-        else:
-             await message.reply_text("⚠️ El administrador no ha configurado su ID.")
-    else:
-         await message.reply_text("Por favor, envíame únicamente tu correo de Google. Ej: `tu@gmail.com`", parse_mode=enums.ParseMode.MARKDOWN)
-
-# --- Comando para aprobar usuarios ---
-# ... (Sin cambios en este manejador) ...
-@app_telegram.on_message(filters.command("aprobar_usuario") & filters.private)
-async def approve_user_command(client: Client, message: Message):
-    logger.info(f"✅ /aprobar_usuario recibido de {message.from_user.id}")
-    
-    if message.from_user.id != ADMIN_TELEGRAM_ID:
-        logger.warning(f"❌ Acceso denegado a /aprobar_usuario para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
-        await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
-        return
-
-    command_parts = message.text.strip().split()
-    if len(command_parts) < 2:
-        await message.reply_text("Uso: `/aprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
-        logger.info("❌ /aprobar_usuario usado sin argumentos")
-        return
-
-    try:
-        target_user_id_str = command_parts[1]
-        if not target_user_id_str.isdigit():
-             raise ValueError("El ID de usuario debe ser un número.")
-        target_user_id = int(target_user_id_str)
-        logger.info(f"✅ user_id objetivo parseado: {target_user_id}")
-    except (ValueError, IndexError) as e:
-        logger.error(f"❌ Error parseando user_id: {e}")
-        await message.reply_text("❌ El ID de usuario debe ser un número válido.")
-        return
-    except Exception as e:
-        logger.error(f"❌ Error inesperado parseando user_id: {e}")
-        await message.reply_text("❌ Error al procesar el ID de usuario.")
-        return
-
-    try:
-        approved_users.add(target_user_id)
-        logger.info(f"✅ Usuario {target_user_id} añadido a approved_users. Total aprobados: {len(approved_users)}")
-
-        await message.reply_text(f"✅ Usuario `{target_user_id}` ha sido aprobado.", parse_mode=enums.ParseMode.MARKDOWN)
-        logger.info(f"✅ Confirmación de aprobación enviada al admin {ADMIN_TELEGRAM_ID}")
-
-        try:
-            user_msg = (
-                f"🎉 ¡Hola! El administrador ha aprobado tu solicitud.\n\n"
-                f"Ahora puedes continuar con el proceso de autenticación.\n"
-                f"Por favor, usa el comando `/drive_login` nuevamente para obtener el enlace de autenticación con Google."
-            )
-            await client.send_message(target_user_id, user_msg)
-            logger.info(f"✅ Notificación de aprobación enviada al usuario {target_user_id}")
-        except Exception as notify_e:
-            error_msg = f"⚠️ Usuario {target_user_id} aprobado, pero no se pudo notificar: {notify_e}"
-            logger.error(error_msg)
-            await message.reply_text(error_msg)
-
-    except Exception as e:
-        logger.error(f"❌ Error en lógica de aprobación para {target_user_id}: {e}", exc_info=True)
-        await message.reply_text(f"⚠️ Ocurrió un error al aprobar al usuario: {e}")
-
-# --- Comando para desaprobar (revocar) usuarios ---
-# ... (Sin cambios en este manejador) ...
-@app_telegram.on_message(filters.command("desaprobar_usuario") & filters.private)
-async def revoke_user_command(client: Client, message: Message):
-    logger.info(f"✅ /desaprobar_usuario recibido de {message.from_user.id}")
-
-    if message.from_user.id != ADMIN_TELEGRAM_ID:
-        logger.warning(f"❌ Acceso denegado a /desaprobar_usuario para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
-        await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
-        return
-
-    command_parts = message.text.strip().split()
-    if len(command_parts) < 2:
-        await message.reply_text("Uso: `/desaprobar_usuario <user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
-        logger.info("❌ /desaprobar_usuario usado sin argumentos")
-        return
-
-    try:
-        target_user_id_str = command_parts[1]
-        if not target_user_id_str.isdigit():
-             raise ValueError("El ID de usuario debe ser un número.")
-        target_user_id = int(target_user_id_str)
-        logger.info(f"✅ user_id objetivo para desaprobación: {target_user_id}")
-    except (ValueError, IndexError) as e:
-        logger.error(f"❌ Error parseando user_id para desaprobación: {e}")
-        await message.reply_text("❌ El ID de usuario debe ser un número válido.")
-        return
-    except Exception as e:
-        logger.error(f"❌ Error inesperado parseando user_id para desaprobación: {e}")
-        await message.reply_text("❌ Error al procesar el ID de usuario.")
-        return
-
-    try:
-        if target_user_id not in approved_users:
-            await message.reply_text(f"⚠️ El usuario `{target_user_id}` no está en la lista de usuarios aprobados.", parse_mode=enums.ParseMode.MARKDOWN)
-            logger.info(f"⚠️ Intento de desaprobar usuario no aprobado: {target_user_id}")
-            return
-
-        approved_users.discard(target_user_id)
-        user_info.pop(target_user_id, None)
-        logger.info(f"✅ Usuario {target_user_id} eliminado de approved_users. Total aprobados: {len(approved_users)}")
-
-        pending_email = pending_emails.pop(target_user_id, None)
-        if pending_email:
-            logger.info(f"ℹ️ Correo pendiente eliminado para {target_user_id}: {pending_email}")
-
-        user_credentials.pop(target_user_id, None)
-        logger.info(f"ℹ️ Credenciales eliminadas para {target_user_id} (si existían).")
-
-        await message.reply_text(
-            f"✅ Usuario `{target_user_id}` ha sido **desaprobado**.\n"
-            f"Ahora deberá enviar su correo nuevamente y ser aprobado para poder autenticarse.",
-            parse_mode=enums.ParseMode.MARKDOWN
-        )
-        logger.info(f"✅ Confirmación de desaprobación enviada al admin {ADMIN_TELEGRAM_ID}")
-
-    except Exception as e:
-        logger.error(f"❌ Error en lógica de desaprobación para {target_user_id}: {e}", exc_info=True)
-        await message.reply_text(f"⚠️ Ocurrió un error al desaprobar al usuario: {e}")
-
-# --- Comando actualizado para listar usuarios aprobados ---
-# ... (Sin cambios en este manejador) ...
-@app_telegram.on_message(filters.command("lista_aprobados") & filters.private)
-async def list_approved_users_command(client: Client, message: Message):
-    logger.info(f"✅ /lista_aprobados recibido de {message.from_user.id}")
-
-    if message.from_user.id != ADMIN_TELEGRAM_ID:
-        logger.warning(f"❌ Acceso denegado a /lista_aprobados para {message.from_user.id}. ADMIN_TELEGRAM_ID={ADMIN_TELEGRAM_ID}")
-        await message.reply_text("❌ No tienes permiso para ejecutar este comando.")
-        return
-
-    if not approved_users:
-        await message.reply_text("ℹ️ La lista de usuarios aprobados está vacía.")
-        return
-
-    response_text = f"**Lista de usuarios aprobados ({len(approved_users)}):**\n"
-    for user_id in approved_users:
-        info = user_info.get(user_id, {})
-        name = info.get('name', 'Desconocido')
-        username = info.get('username', 'Sin @')
-        
-        response_text += f"- **{name}** ({username}) - `{user_id}`\n"
-
-    await message.reply_text(response_text, parse_mode=enums.ParseMode.MARKDOWN)
-    logger.info(f"✅ Lista de aprobados enviada al admin {ADMIN_TELEGRAM_ID}")
-
-# --- Rutas Web OAuth ---
-# ... (Sin cambios en estas rutas) ...
-@app_quart.route('/')
-async def index():
-    return '<h1>Bot Listo</h1><p>El bot está en funcionamiento.</p>'
-
-@app_quart.route('/oauth2callback')
-async def oauth2callback():
-    code = request.args.get('code')
-    state = request.args.get('state')
-    if not code:
-        return 'Error: No se recibió el código de autorización.', 400
-    if not state or state not in login_states:
-         return 'Error: Estado de autenticación no válido.', 400
-
-    user_id = login_states.pop(state, None)
-    if not user_id:
-        return 'Error: No se pudo asociar el código con un usuario.', 400
-
-    creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_data:
-        return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
-
-    try:
-        async with aiofiles.open('credentials_temp.json', 'w') as f:
-            await f.write(creds_data)
-        flow = Flow.from_client_secrets_file(
-            'credentials_temp.json', scopes=SCOPES,
-            redirect_uri=RENDER_REDIRECT_URI)
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-        user_credentials[user_id] = creds
-        if os.path.exists('credentials_temp.json'):
-            os.remove('credentials_temp.json')
-        return """
-        <h1>¡Autenticación Exitosa!</h1>
-        <p>Tu cuenta de Google Drive ha sido conectada.</p>
-        <p>Puedes cerrar esta ventana y usar el bot en Telegram.</p>
-        <script>setTimeout(function() { window.close(); }, 3000);</script>
-        """
-    except Exception as e:
-        logger.error(f"Error en oauth2callback para {user_id}: {e}")
-        if os.path.exists('credentials_temp.json'):
-            os.remove('credentials_temp.json')
-        return f'Error durante la autenticación: {e}', 500
-
-# --- Punto de Entrada ---
+# --- Punto de Entrada (solo cambios relevantes) ---
 if __name__ == "__main__":
     async def run_bot():
         await app_telegram.start()
         logger.info("Bot de Telegram iniciado.")
         await set_bot_commands(app_telegram)
         
-        # --- NUEVO: Iniciar el procesador de la cola ---
-        # Crear una tarea para procesar la cola continuamente
         queue_processor_task = asyncio.create_task(process_upload_queue(app_telegram))
         logger.info("Procesador de cola iniciado.")
 
@@ -904,16 +665,5 @@ if __name__ == "__main__":
         await app_quart.run_task(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
     loop = asyncio.get_event_loop()
-    # --- NUEVO: Guardar la referencia a la tarea del bot para poder cancelarla si es necesario ---
     bot_task = loop.create_task(run_bot())
     quart_task = loop.run_until_complete(run_quart())
-    
-    # Manejo de cierre limpio (opcional)
-    # try:
-    #     await asyncio.gather(bot_task, quart_task)
-    # except KeyboardInterrupt:
-    #     logger.info("Interrupción recibida, cerrando...")
-    #     bot_task.cancel()
-    #     queue_processor_task.cancel() # Necesitaríamos una referencia global a queue_processor_task
-    #     await asyncio.gather(bot_task, queue_processor_task, return_exceptions=True)
-    #     await app_telegram.stop()
