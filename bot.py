@@ -470,7 +470,7 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
 
-# --- Comandos restantes (sin cambios) ---
+# --- Comandos restantes ---
 @app_telegram.on_message(filters.command("drive_login"))
 async def drive_login_command(client: Client, message: Message):
     user_id = message.from_user.id
@@ -489,7 +489,7 @@ async def drive_login_command(client: Client, message: Message):
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
         # CORRECCIÓN AQUÍ
-        if not creds_: # <-- Corrección aquí
+        if not creds_data: # <-- Corrección correcta
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
         try:
@@ -535,7 +535,7 @@ async def drive_login_command(client: Client, message: Message):
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     # CORRECCIÓN AQUÍ
-    if not creds_: # <-- Corrección aquí
+    if not creds_data: # <-- Corrección correcta
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
             try:
@@ -825,7 +825,7 @@ async def oauth2callback():
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     # CORRECCIÓN AQUÍ
-    if not creds_: # <-- Corrección aquí
+    if not creds_data: # <-- Corrección correcta
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
 
     try:
