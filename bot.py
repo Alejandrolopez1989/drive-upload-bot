@@ -40,9 +40,8 @@ app_quart = Quart(__name__)
 app_telegram = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- Diccionarios y Colas en memoria ---
-active_operations = {} # {user_id: {'task', 'file_path', 'status_message_id', 'cancel_flag', 'original_message'}}
+active_operations = {} # {user_id: {'task', 'file_path', 'cancel_flag', 'original_message'}}
 upload_queue = deque() # [(user_id, original_message_obj), ...]
-# No necesitamos queue_status_messages ya que editamos el mensaje original
 user_credentials = {}
 login_states = {}
 pending_emails = {}
@@ -496,7 +495,7 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
 
-# --- Comandos restantes (sin cambios sustanciales) ---
+# --- Comandos restantes ---
 @app_telegram.on_message(filters.command("drive_login"))
 async def drive_login_command(client: Client, message: Message):
     user_id = message.from_user.id
@@ -514,7 +513,8 @@ async def drive_login_command(client: Client, message: Message):
         state = secrets.token_urlsafe(32)
         login_states[state] = user_id
         creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if not creds_ # <-- Corrección aquí
+        # CORRECCIÓN AQUÍ: Reemplazar creds_ por creds_data y agregar :
+        if not creds_data: # <-- Corrección aquí
             await message.reply_text("❌ Error: Credenciales de Google no configuradas.")
             return
         try:
@@ -559,7 +559,8 @@ async def drive_login_command(client: Client, message: Message):
     state = secrets.token_urlsafe(32)
     login_states[state] = user_id
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_ # <-- Corrección aquí
+    # CORRECCIÓN AQUÍ: Reemplazar creds_ por creds_data y agregar :
+    if not creds_data: # <-- Corrección aquí
         await message.reply_text("❌ Error del servidor: Credenciales no configuradas.")
         if ADMIN_TELEGRAM_ID:
             try:
@@ -645,7 +646,6 @@ async def delete_file(client: Client, message: Message):
     else:
         await status_message.edit_text("❌ Error al eliminar el video de tu Google Drive o el video no existe.")
 
-# --- Manejador para correos de usuarios ---
 @app_telegram.on_message(filters.text & filters.private & ~filters.me & ~filters.regex(r"^/"))
 async def handle_user_email(client: Client, message: Message):
     user_id = message.from_user.id
@@ -689,7 +689,6 @@ async def handle_user_email(client: Client, message: Message):
     else:
          await message.reply_text("Por favor, envíame únicamente tu correo de Google. Ej: `tu@gmail.com`", parse_mode=enums.ParseMode.MARKDOWN)
 
-# --- Comando para aprobar usuarios ---
 @app_telegram.on_message(filters.command("aprobar_usuario") & filters.private)
 async def approve_user_command(client: Client, message: Message):
     logger.info(f"✅ /aprobar_usuario recibido de {message.from_user.id}")
@@ -744,7 +743,6 @@ async def approve_user_command(client: Client, message: Message):
         logger.error(f"❌ Error en lógica de aprobación para {target_user_id}: {e}", exc_info=True)
         await message.reply_text(f"⚠️ Ocurrió un error al aprobar al usuario: {e}")
 
-# --- Comando para desaprobar usuarios ---
 @app_telegram.on_message(filters.command("desaprobar_usuario") & filters.private)
 async def revoke_user_command(client: Client, message: Message):
     logger.info(f"✅ /desaprobar_usuario recibido de {message.from_user.id}")
@@ -803,7 +801,6 @@ async def revoke_user_command(client: Client, message: Message):
         logger.error(f"❌ Error en lógica de desaprobación para {target_user_id}: {e}", exc_info=True)
         await message.reply_text(f"⚠️ Ocurrió un error al desaprobar al usuario: {e}")
 
-# --- Comando para listar usuarios aprobados ---
 @app_telegram.on_message(filters.command("lista_aprobados") & filters.private)
 async def list_approved_users_command(client: Client, message: Message):
     logger.info(f"✅ /lista_aprobados recibido de {message.from_user.id}")
@@ -847,7 +844,8 @@ async def oauth2callback():
         return 'Error: No se pudo asociar el código con un usuario.', 400
 
     creds_data = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_ # <-- Corrección aquí
+    # CORRECCIÓN AQUÍ: Reemplazar creds_ por creds_data y agregar :
+    if not creds_data: # <-- Corrección aquí
         return "Error: GOOGLE_CREDENTIALS_JSON no está configurado.", 500
 
     try:
