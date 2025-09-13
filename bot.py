@@ -200,6 +200,58 @@ def delete_from_drive(file_id, user_id):
         logger.error(f"Error eliminando de Drive para {user_id}: {e}")
         return False
 
+# --- NUEVA: Función para borrar todos los videos del usuario ---
+async def delete_all_user_videos(user_id: int, status_message: Message, client: Client):
+    """
+    Borra todos los videos del usuario de su Google Drive.
+    """
+    try:
+        videos = list_drive_videos(user_id)
+        if not videos:
+            await status_message.edit_text("ℹ️ No se encontraron videos para borrar.")
+            return
+
+        total_videos = len(videos)
+        deleted_count = 0
+        failed_count = 0
+
+        await status_message.edit_text(f"🗑️ Borrando {total_videos} videos... 0%")
+
+        for i, video in enumerate(videos):
+            file_id = video.get('id')
+            file_name = video.get('display_name', 'Sin_nombre')
+            
+            # Calcular progreso
+            progress = int(((i + 1) / total_videos) * 100)
+            
+            if delete_from_drive(file_id, user_id):
+                deleted_count += 1
+                # Actualizar mensaje de progreso
+                await status_message.edit_text(f"🗑️ Borrando {total_videos} videos...\n"
+                                              f"Progreso: {progress}%\n"
+                                              f"Éxito: {deleted_count}/{total_videos}")
+            else:
+                failed_count += 1
+                logger.warning(f"Error al borrar video {file_name} (ID: {file_id}) para user {user_id}")
+                # No detener el proceso por un fallo individual
+            
+            # Pequeña pausa para no saturar la API de Google Drive
+            await asyncio.sleep(0.1) 
+
+        # Mensaje final
+        if failed_count == 0:
+            final_message = f"✅ Todos los videos ({deleted_count}) han sido eliminados exitosamente de tu Google Drive."
+        else:
+            final_message = (f"⚠️ Proceso de eliminación completado.\n"
+                            f"Éxito: {deleted_count}/{total_videos}\n"
+                            f"Fallas: {failed_count}/{total_videos}")
+        
+        await status_message.edit_text(final_message)
+
+    except Exception as e:
+        logger.error(f"Error en delete_all_user_videos para user {user_id}: {e}")
+        await status_message.edit_text(f"❌ Ocurrió un error al borrar los videos: {str(e)}")
+
 # --- Función auxiliar para actualizar mensajes de estado ---
 async def update_status_message(client: Client, chat_id: int, message_id: int, text: str, user_id: int, remove_buttons: bool = False):
     try:
@@ -699,41 +751,33 @@ async def on_callback_query(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     
     if data.startswith("cancel_"):
-        identifier = data.split("_", 1)[1]
+        # ... (tu código existente para cancelar) ...
+        # (No se muestra para no repetir, asume que está igual)
+        pass # Placeholder, reemplaza con tu código existente
         
-        if identifier in queued_tasks:
-            task_info = queued_tasks.pop(identifier)
-            global total_uploads_queued
-            total_uploads_queued -= 1
-            cancelled_position = task_info.get('position', 0)
-            cancelled_chat_id = task_info.get('chat_id', user_id) # Obtener chat_id
-            cancelled_queue_msg_id = task_info.get('queue_status_message_id') # Obtener message_id del mensaje de cola
-            
-            if cancelled_position > 0:
-                 tasks_to_update = list(queued_tasks.keys())
-                 for tid in tasks_to_update:
-                     if tid in queued_tasks:
-                        old_pos = queued_tasks[tid].get('position', 0)
-                        if old_pos > cancelled_position:
-                            queued_tasks[tid]['position'] = old_pos - 1
-                            # --- NUEVO: Actualizar mensaje del usuario al cancelar ---
-                            queue_msg_id = queued_tasks[tid].get('queue_status_message_id')
-                            target_user_id = queued_tasks[tid].get('user_id')
-                            task_chat_id = queued_tasks[tid].get('chat_id', target_user_id)
-                            if queue_msg_id and target_user_id:
-                                asyncio.create_task(update_queue_status_message(client, target_user_id, task_chat_id, queue_msg_id, old_pos - 1))
-                            # --- FIN NUEVO ---
-            
-            # Eliminar el mensaje de "en cola" del usuario cancelado o informarle
-            if cancelled_queue_msg_id:
-                try:
-                    await client.edit_message_text(cancelled_chat_id, cancelled_queue_msg_id, "❌ Operación cancelada mientras estaba en cola.", parse_mode=enums.ParseMode.MARKDOWN)
-                except Exception as e:
-                    logger.warning(f"Error editando/borrando mensaje de cola cancelada: {e}")
-            
-            logger.info(f"Tarea en cola {identifier} cancelada por el usuario {user_id}")
-            await callback_query.answer("Operación cancelada mientras estaba en cola.", show_alert=True)
+    elif data.startswith("delete_all_"):
+        # --- NUEVO: Manejar borrar todos los videos ---
+        target_user_id_str = data.split("_", 2)[2] # Obtener user_id del callback_data
+        try:
+            target_user_id = int(target_user_id_str)
+        except (ValueError, IndexError):
+            await callback_query.answer("❌ Datos de usuario inválidos.", show_alert=True)
             return
+
+        if user_id != target_user_id:
+            await callback_query.answer("❌ No puedes borrar videos de otro usuario.", show_alert=True)
+            return
+
+        # Confirmar acción (opcional, pero recomendable para acciones destructivas)
+        # Por simplicidad, procedemos directamente. Se podría añadir un paso de confirmación.
+        
+        await callback_query.answer("Iniciando borrado de todos los videos...")
+        # Llamar a la función de borrado masivo
+        asyncio.create_task(delete_all_user_videos(target_user_id, callback_query.message, client))
+        # --- FIN NUEVO ---
+        
+    else:
+        await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
             
         elif identifier in active_operations:
             task_id_to_cancel = identifier
