@@ -747,54 +747,107 @@ async def handle_video(client: Client, message: Message):
 
 @app_telegram.on_callback_query()
 async def on_callback_query(client: Client, callback_query: CallbackQuery):
+    """Manejador central para todas las consultas de callback."""
     data = callback_query.data
     user_id = callback_query.from_user.id
-    
+    # Usar el chat_id del mensaje para respuestas
+    chat_id = callback_query.message.chat.id 
+
+    # --- Manejar Cancelación ---
     if data.startswith("cancel_"):
-        # ... (tu código existente para cancelar) ...
-        # (No se muestra para no repetir, asume que está igual)
-        pass # Placeholder, reemplaza con tu código existente
+        identifier = data.split("_", 1)[1] # Obtener el ID (task_id o user_id)
         
+        # Verificar si es una cancelación de tarea en cola
+        if identifier in queued_tasks:
+            task_info = queued_tasks.pop(identifier)
+            global total_uploads_queued
+            total_uploads_queued -= 1
+            cancelled_position = task_info.get('position', 0)
+            cancelled_chat_id = task_info.get('chat_id', user_id)
+            cancelled_queue_msg_id = task_info.get('queue_status_message_id')
+            
+            if cancelled_position > 0:
+                 tasks_to_update = list(queued_tasks.keys())
+                 for tid in tasks_to_update:
+                     if tid in queued_tasks:
+                        old_pos = queued_tasks[tid].get('position', 0)
+                        if old_pos > cancelled_position:
+                            queued_tasks[tid]['position'] = old_pos - 1
+                            queue_msg_id = queued_tasks[tid].get('queue_status_message_id')
+                            target_user_id = queued_tasks[tid].get('user_id')
+                            task_chat_id = queued_tasks[tid].get('chat_id', target_user_id)
+                            if queue_msg_id and target_user_id:
+                                asyncio.create_task(update_queue_status_message(client, target_user_id, task_chat_id, queue_msg_id, old_pos - 1))
+            
+            if cancelled_queue_msg_id:
+                try:
+                    await client.edit_message_text(cancelled_chat_id, cancelled_queue_msg_id, "❌ Operación cancelada mientras estaba en cola.", parse_mode=enums.ParseMode.MARKDOWN)
+                except Exception as e:
+                    logger.warning(f"Error editando/borrando mensaje de cola cancelada: {e}")
+            
+            logger.info(f"Tarea en cola {identifier} cancelada por el usuario {user_id}")
+            await callback_query.answer("Operación cancelada mientras estaba en cola.", show_alert=True)
+            return # Salir después de manejar
+
+        # Verificar si es una cancelación de operación activa
+        elif identifier in active_operations:
+            task_id_to_cancel = identifier
+            operation = active_operations[task_id_to_cancel]
+            # Verificar permiso
+            if operation['user_id'] != user_id and user_id != ADMIN_TELEGRAM_ID:
+                 await callback_query.answer("❌ No puedes cancelar la operación de otro usuario.", show_alert=True)
+                 return # Salir si no tiene permiso
+                 
+            operation['cancel_flag'].set()
+            status_message_id = operation['status_message_id']
+            # Usar la función auxiliar para actualizar el mensaje
+            await update_status_message(client, chat_id, status_message_id, "⏳ Cancelando operación...", operation['user_id'], remove_buttons=True)
+            await callback_query.answer("Operación cancelada.")
+            return # Salir después de manejar
+
+        else:
+             await callback_query.answer("❌ No se encontró la operación para cancelar.", show_alert=True)
+             return # Salir si no se encuentra
+
+    # --- Manejar Borrar Todos los Videos ---
     elif data.startswith("delete_all_"):
-        # --- NUEVO: Manejar borrar todos los videos ---
-        target_user_id_str = data.split("_", 2)[2] # Obtener user_id del callback_data
+        target_user_id_str = data.split("_", 2)[2] # delete_all_<user_id>
         try:
             target_user_id = int(target_user_id_str)
         except (ValueError, IndexError):
             await callback_query.answer("❌ Datos de usuario inválidos.", show_alert=True)
-            return
+            return # Salir si el ID es inválido
 
         if user_id != target_user_id:
             await callback_query.answer("❌ No puedes borrar videos de otro usuario.", show_alert=True)
-            return
+            return # Salir si no es el propietario
 
-        # Confirmar acción (opcional, pero recomendable para acciones destructivas)
-        # Por simplicidad, procedemos directamente. Se podría añadir un paso de confirmación.
-        
         await callback_query.answer("Iniciando borrado de todos los videos...")
-        # Llamar a la función de borrado masivo
+        # Llamar a la función de borrado masivo como una tarea en segundo plano
         asyncio.create_task(delete_all_user_videos(target_user_id, callback_query.message, client))
-        # --- FIN NUEVO ---
-        
+        return # Salir después de iniciar la tarea
+
+    # --- Manejar Borrar Video Individual (desde comando /delete_<file_id>) ---
+    # Este bloque maneja callbacks que podrían venir de comandos inline o botones no definidos,
+    # pero específicamente cubre el caso de comandos /delete_<file_id> si se usan con botones.
+    # Si solo usas el regex para /delete_<file_id>, este bloque puede no ser necesario.
+    # Se mantiene por si acaso se generan callbacks desde esos comandos de otra forma.
+    # Si no lo necesitas, puedes eliminar este bloque elif.
+    elif data.startswith("/delete_"): # Ajustar según el formato exacto de tu callback_data para borrar individual
+        # Esta parte es más compleja de mapear directamente desde el regex del comando.
+        # Una opción es extraer el file_id del callback_data si tiene un formato conocido.
+        # Por ejemplo, si el callback_data es "/delete_<file_id>".
+        # Si usas botones inline para borrar individual, el callback_data debería ser diferente (e.g., "del_file_<file_id>")
+        # Para evitar confusiones, este manejador se centrará en los casos claros.
+        # Si el comando /delete_<file_id> genera un callback, necesitas definir un callback_data distinto para el botón.
+        # Por ahora, lo dejamos pasar al else para "Acción no reconocida".
+        # Si decides implementar botones para borrar individual, crea un nuevo elif.
+        pass # Permitir que pase al else
+
+    # --- Manejar cualquier otro callback no reconocido ---
     else:
         await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
-            
-        elif identifier in active_operations:
-            task_id_to_cancel = identifier
-            operation = active_operations[task_id_to_cancel]
-            if operation['user_id'] != user_id and user_id != ADMIN_TELEGRAM_ID:
-                 await callback_query.answer("❌ No puedes cancelar la operación de otro usuario.", show_alert=True)
-                 return
-            operation['cancel_flag'].set()
-            status_message_id = operation['status_message_id']
-            await update_status_message(client, callback_query.message.chat.id, status_message_id, "⏳ Cancelando operación...", operation['user_id'], remove_buttons=True)
-            await callback_query.answer("Operación cancelada.")
-            return
-        else:
-             await callback_query.answer("❌ No se encontró la operación para cancelar.", show_alert=True)
-             return
-    else:
-        await callback_query.answer("❌ Acción no reconocida.", show_alert=True)
+        logger.warning(f"Callback no reconocido recibido: {data} de user {user_id}")
 
 @app_telegram.on_message(filters.regex(r"^/delete_([a-zA-Z0-9_-]+)$"))
 async def delete_file(client: Client, message: Message):
