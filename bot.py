@@ -594,6 +594,15 @@ async def ver_nube_command(client: Client, message: Message):
     if not videos:
         await status_message.edit_text("No se encontraron videos en tu nube.")
         return
+    
+    # --- MODIFICADO: Agregar botón para borrar todos ---
+    # Crear botones inline
+    keyboard = [
+        [InlineKeyboardButton("🗑️ Borrar Todos", callback_data=f"delete_all_{user_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    # --- FIN MODIFICADO ---
+    
     response_text = f"*{len(videos)} videos en tu nube:*\n"
     for video in videos:
         file_name_to_display = video.get('display_name', 'Sin_nombre')
@@ -602,13 +611,18 @@ async def ver_nube_command(client: Client, message: Message):
         file_url = get_file_url(file_id)
         delete_command = f"`/delete_{file_id}`"
         response_text += f"\n🎬 [{display_name_limited}]({file_url})\n🗑️ {delete_command}\n"
+    
     if len(response_text) > 4096:
+        # Si el mensaje es muy largo, dividirlo
         parts = [response_text[i:i+4096] for i in range(0, len(response_text), 4096)]
-        await status_message.edit_text(parts[0], parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        # Editar el primer mensaje con el botón
+        await status_message.edit_text(parts[0], parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True, reply_markup=reply_markup)
+        # Enviar el resto sin el botón
         for part in parts[1:]:
              await message.reply_text(part, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
     else:
-        await status_message.edit_text(response_text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        # Editar el mensaje con el botón
+        await status_message.edit_text(response_text, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True, reply_markup=reply_markup)
 
 # --- CORREGIDO: handle_video con manejo de errores y almacenamiento anticipado ---
 @app_telegram.on_message(filters.video & filters.private)
