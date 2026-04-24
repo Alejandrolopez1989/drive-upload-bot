@@ -1,8 +1,9 @@
+six
 Pyrogram
 TgCrypto
 Quart
 google-auth
-google-auth-oauthlib
+google-auth-oauthlib==0.3.0
 google-api-python-client
 aiofiles
 python-dotenv  # <-- Agrega esta línea
